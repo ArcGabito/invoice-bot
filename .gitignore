@@ -6,12 +6,14 @@ node_modules/
 .env.*
 !.env.example
 
-# Datos del usuario: base de datos, facturas, exportaciones y logs
-data/
-exports/
-facturas/
-invoices/
-logs/
+# Datos del usuario: base de datos, facturas, exportaciones y logs.
+# Anclados a la raíz con "/" para no ocultar carpetas de código como
+# src/infrastructure/exports/.
+/data/
+/exports/
+/facturas/
+/invoices/
+/logs/
 *.db
 *.db-shm
 *.db-wal
