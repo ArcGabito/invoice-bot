@@ -1,0 +1,34 @@
+# Dependencias
+node_modules/
+
+# Secretos y configuración local
+.env
+.env.*
+!.env.example
+
+# Datos del usuario: base de datos, facturas, exportaciones y logs
+data/
+exports/
+facturas/
+invoices/
+logs/
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Documentos que nunca deben subirse (las pruebas generan los suyos en temporales)
+*.pdf
+*.png
+*.jpg
+*.jpeg
+
+# Cobertura y herramientas
+coverage/
+.vs/
+*.user
+.DS_Store
+Thumbs.db
+
+# Artefactos de compilación de Visual Studio
+obj/

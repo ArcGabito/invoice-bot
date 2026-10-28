@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="invoice-bot.esproj">
+    <Build />
+    <Deploy />
+  </Project>
+</Solution>
