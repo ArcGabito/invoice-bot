@@ -4,15 +4,17 @@
 
 Automatización inteligente de facturas mediante extracción de texto, LLM y validación contable local.
 
-InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee comprobantes de pago peruanos, extrae sus datos con un modelo de IA, **comprueba con código determinista** que sean coherentes, detecta duplicados y guarda todo en una base de datos SQLite local, con trazabilidad de cada resultado.
+InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee comprobantes de pago peruanos —directamente del XML del comprobante electrónico cuando existe, o con un modelo de IA desde el PDF—, **comprueba con código determinista** que sean coherentes, detecta duplicados y guarda todo en una base de datos SQLite local, con trazabilidad de cada resultado.
 
-> El LLM propone los datos; el código comprueba su consistencia; el usuario resuelve los casos dudosos.
+> El XML o el LLM proponen los datos; el código comprueba su consistencia; el usuario resuelve los casos dudosos.
 
-## Estado: v0.1.0
+## Estado: v0.1.0 (+ XML en desarrollo para v0.2.0)
 
 | Funcionalidad | Estado |
 | --- | --- |
-| Escaneo de carpetas (PDF, PNG, JPG), SHA-256 e idempotencia | ✅ |
+| Escaneo de carpetas (XML, PDF, PNG, JPG), SHA-256 e idempotencia | ✅ |
+| Lectura de comprobantes electrónicos SUNAT en XML UBL 2.1, sin IA | ✅ |
+| Vinculación del PDF (representación impresa) con su XML; omisión de CDR | ✅ |
 | Extracción de texto nativo de PDF | ✅ |
 | Extracción con IA: Claude (Anthropic), Ollama (local) o simulado | ✅ |
 | Validación: RUC (módulo 11), fechas, moneda, serie, aritmética tributaria, IGV | ✅ |
@@ -110,17 +112,22 @@ Por defecto se exportan las facturas **válidas y con advertencias**, y se exclu
 ```text
 scan → descubrir archivos → SHA-256 → ¿ya procesado? → sí: omitir
                                          ↓ no
-                            texto del PDF → ¿suficiente? → no: needs_ocr
-                                         ↓ sí
-                            LLM (JSON con esquema) → normalizar → validar
-                                         ↓
-                            duplicados de negocio → SQLite (transacción) → resumen
+        1.º XML UBL ─────→ leer datos (sin IA) ────────────┐   CDR → omitir
+        2.º PDF → ¿hay un XML extraído con su mismo nombre? → sí: vincular (sin IA)
+                                         ↓ no                  │
+            texto del PDF → ¿suficiente? → no: needs_ocr       │
+                                         ↓ sí                  │
+            LLM (JSON con esquema) ────────────────────────────┤
+                                                               ↓
+                normalizar → validar → duplicados de negocio → SQLite (transacción) → resumen
 ```
 
+- **XML primero**: los comprobantes electrónicos traen un XML firmado (UBL 2.1) con los datos exactos. InvoiceBot lo lee sin IA —gratis y sin errores de interpretación— y reparte los importes según el catálogo de tributos de SUNAT (gravadas, exoneradas, inafectas, exportación, ISC, ICBPER). El PDF con el mismo nombre en la misma carpeta se vincula al XML y no se envía a la IA. La constancia de recepción (CDR, `R-*.xml`) se reconoce y se omite. La IA queda para lo que no tiene XML: facturas físicas, tickets y documentos del extranjero. La firma digital del XML todavía no se verifica.
 - **Idempotencia**: cada archivo se identifica por su SHA-256. Ejecutar dos veces el mismo comando no duplica registros ni repite llamadas a la IA.
 - **Concurrencia limitada**: `INVOICEBOT_CONCURRENCY` documentos a la vez (2 por defecto).
 - **Reintentos controlados**: un JSON inválido se repite una vez en el momento; los errores de red se reintentan con `retry --failed`; un rechazo del modelo, un documento que no es comprobante o un PDF dañado no se reintentan salvo con `--force`.
-- **Trazabilidad**: cada intento queda en `extraction_runs` con proveedor, modelo que respondió, versión del prompt, tokens y respuesta cruda; cada factura guarda la versión de las reglas de validación.
+- **Trazabilidad**: cada intento queda en `extraction_runs` con proveedor (`ubl-xml` para los XML), modelo que respondió, versión del prompt o del lector, tokens y respuesta cruda; cada factura guarda su origen (`xml` o `ai`) y la versión de las reglas de validación.
+- **Actualizaciones seguras**: antes de aplicar una migración a una base de datos con datos, InvoiceBot guarda una copia completa en `data/backups/`.
 
 ### Reglas de validación
 

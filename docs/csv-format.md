@@ -32,7 +32,8 @@ Las columnas, su orden y sus nombres son estables dentro de una versión mayor. 
 | `duplicate_count` | entero | Otras facturas registradas con el mismo emisor, tipo, serie y número. |
 | `file_name` | texto | Nombre del archivo original. |
 | `sha256` | hex | Huella del archivo original. |
+| `data_source` | `xml`, `ai` | Origen de los datos: el XML del comprobante electrónico (exacto) o la extracción con IA desde el PDF (propuesta, validada). Añadida en v0.2.0. |
 
 **Importes**: punto como separador decimal, dos decimales, sin separador de miles ni símbolo de moneda (`1234.50`). Un campo vacío significa que el dato no aparece en el comprobante; no equivale a cero.
 
-**Filtros por defecto**: solo facturas `valid` y `warning`; de cada grupo de posibles duplicados se exporta solo la primera registrada. Los documentos fallidos o pendientes de OCR no tienen factura y nunca aparecen.
+**Filtros por defecto**: solo facturas `valid` y `warning`; de cada grupo de posibles duplicados se exporta la leída de un XML si existe y, si no, la primera registrada. Los documentos fallidos o pendientes de OCR no tienen factura y nunca aparecen.

@@ -9,6 +9,8 @@ const OUTCOME_LABEL = {
   error: 'con errores',
   needs_ocr: 'requiere OCR',
   failed: 'fallido',
+  skipped: 'omitido',
+  printed_representation: 'vinculado a su XML',
 };
 
 export function registerScan(program, run) {
@@ -28,7 +30,9 @@ export function registerScan(program, run) {
           deps: ctx,
           onProgress: (event) => {
             if (event.phase === 'processed') {
-              const label = OUTCOME_LABEL[event.result.validationStatus ?? event.result.outcome];
+              const { validationStatus, reason, outcome } = event.result;
+              const label =
+                OUTCOME_LABEL[validationStatus ?? reason ?? outcome] ?? OUTCOME_LABEL[outcome];
               out.progress(
                 `[${event.done}/${event.total}] ${path.basename(event.file)} → ${label}`,
               );
@@ -57,6 +61,9 @@ function printSummary(out, s, { dryRun, dbPath, version }) {
     out.line(`Con advertencias: ${s.warning}`);
     out.line(`Con errores: ${s.error}`);
     out.line(`Fallidos: ${s.failed}`);
+    out.line(`Leídos de XML (sin IA): ${s.fromXml}`);
+    if (s.linkedToXml) out.line(`PDF vinculados a su XML (sin IA): ${s.linkedToXml}`);
+    if (s.skipped) out.line(`Omitidos (CDR u otros XML): ${s.skipped}`);
   }
   out.line(`Requieren OCR: ${s.needsOcr}`);
   out.line(`Ya procesados (omitidos): ${s.alreadyProcessed}`);

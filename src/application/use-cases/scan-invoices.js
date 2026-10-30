@@ -1,5 +1,6 @@
 import path from 'node:path';
-import { DOCUMENT_STATUS } from '../../domain/invoice.js';
+import { DATA_SOURCE, DOCUMENT_STATUS, SKIP_REASON } from '../../domain/invoice.js';
+import { XML_MIME_TYPE } from '../../infrastructure/documents/document-router.js';
 import { mapWithConcurrency } from '../../shared/concurrency.js';
 import { discoverFiles, hashFile } from '../../infrastructure/documents/file-scanner.js';
 import { processDocument } from './process-document.js';
@@ -15,6 +16,9 @@ export function emptySummary() {
     error: 0,
     failed: 0,
     needsOcr: 0,
+    fromXml: 0,
+    linkedToXml: 0,
+    skipped: 0,
     alreadyProcessed: 0,
     previouslyFailed: 0,
     exactDuplicates: 0,
@@ -28,9 +32,13 @@ export function addOutcome(summary, result, filePath) {
   if (result.outcome === 'extracted') {
     summary.extracted++;
     summary[result.validationStatus]++;
+    if (result.dataSource === DATA_SOURCE.XML) summary.fromXml++;
     if (result.possibleDuplicate) summary.possibleDuplicates++;
   } else if (result.outcome === 'needs_ocr') {
     summary.needsOcr++;
+  } else if (result.outcome === 'skipped') {
+    if (result.reason === SKIP_REASON.PRINTED_REPRESENTATION) summary.linkedToXml++;
+    else summary.skipped++;
   } else {
     summary.failed++;
     summary.failures.push({ file: filePath, message: result.error });
@@ -43,7 +51,9 @@ export function addOutcome(summary, result, filePath) {
  * Fase 1 (secuencial): descubre archivos, calcula SHA-256 y registra cada
  * documento una sola vez. Así dos copias idénticas en el mismo lote no
  * compiten por insertar el mismo hash.
- * Fase 2 (concurrente, limitada): procesa los documentos pendientes.
+ * Fase 2 (concurrente, limitada): procesa primero los XML y después el resto.
+ * Un PDF con el mismo nombre que un XML ya extraído en su carpeta es su
+ * representación impresa: se vincula al XML y no se envía a la IA.
  *
  * Es idempotente: un documento ya extraído no se vuelve a enviar a la IA.
  */
@@ -121,12 +131,12 @@ export async function scanInvoices({
 
   if (!dryRun) {
     let done = 0;
-    await mapWithConcurrency(queue, config.concurrency, async (item) => {
-      const result = await processDocument({
-        document: item.document,
-        filePath: item.filePath,
-        deps,
-      });
+    const run = async (item) => {
+      const sibling =
+        item.mimeType === XML_MIME_TYPE ? null : findExtractedXmlSibling(item, repository);
+      const result = sibling
+        ? linkToXml(item.document, sibling, repository)
+        : await processDocument({ document: item.document, filePath: item.filePath, deps });
       addOutcome(summary, result, item.filePath);
       onProgress({
         phase: 'processed',
@@ -135,11 +145,36 @@ export async function scanInvoices({
         file: item.filePath,
         result,
       });
-    });
+    };
+    const xmlItems = queue.filter((item) => item.mimeType === XML_MIME_TYPE);
+    const otherItems = queue.filter((item) => item.mimeType !== XML_MIME_TYPE);
+    await mapWithConcurrency(xmlItems, config.concurrency, run);
+    await mapWithConcurrency(otherItems, config.concurrency, run);
   }
 
   summary.durationMs = Date.now() - started;
   return summary;
+}
+
+/** XML extraído con el mismo nombre base y en la misma carpeta que el archivo. */
+function findExtractedXmlSibling(item, repository) {
+  const { dir, name } = path.parse(item.filePath);
+  for (const ext of ['.xml', '.XML']) {
+    const xml = repository.findDocumentByPath(path.join(dir, `${name}${ext}`));
+    if (xml?.status === DOCUMENT_STATUS.EXTRACTED) return xml;
+  }
+  return null;
+}
+
+function linkToXml(document, xmlDocument, repository) {
+  repository.updateDocument(document.id, {
+    status: DOCUMENT_STATUS.SKIPPED,
+    skip_reason: SKIP_REASON.PRINTED_REPRESENTATION,
+    linked_document_id: xmlDocument.id,
+    error_message: `Representación impresa de ${xmlDocument.file_name}: los datos se toman del XML`,
+    processed_at: new Date().toISOString(),
+  });
+  return { outcome: 'skipped', reason: SKIP_REASON.PRINTED_REPRESENTATION };
 }
 
 function classifyExisting(document, filePath, summary, enqueue) {
@@ -147,6 +182,7 @@ function classifyExisting(document, filePath, summary, enqueue) {
   if (isCopy) summary.exactDuplicates++;
   switch (document.status) {
     case DOCUMENT_STATUS.EXTRACTED:
+    case DOCUMENT_STATUS.SKIPPED:
       if (!isCopy) summary.alreadyProcessed++;
       break;
     case DOCUMENT_STATUS.FAILED:

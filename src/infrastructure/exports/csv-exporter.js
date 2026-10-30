@@ -25,6 +25,7 @@ export const CSV_COLUMNS = Object.freeze([
   'duplicate_count',
   'file_name',
   'sha256',
+  'data_source',
 ]);
 
 export function invoiceToCsvRecord(row) {

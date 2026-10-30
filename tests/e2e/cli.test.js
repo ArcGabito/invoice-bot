@@ -26,7 +26,9 @@ function cli(...args) {
   return { code: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
-describe('invoicebot CLI', () => {
+// Cada prueba lanza procesos de Node completos; con la suite en paralelo
+// pueden superar el límite por defecto de 5 s.
+describe('invoicebot CLI', { timeout: 30_000 }, () => {
   fs.mkdirSync(inbox, { recursive: true });
   writeTextPdf(path.join(inbox, 'f1.pdf'), sampleInvoiceLines());
   writeTextPdf(

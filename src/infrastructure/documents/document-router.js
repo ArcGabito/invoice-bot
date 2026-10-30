@@ -1,8 +1,14 @@
+import fs from 'node:fs';
 import { extractPdfText } from './pdf-extractor.js';
+import { parseUbl } from './ubl-parser.js';
+
+export const XML_MIME_TYPE = 'application/xml';
 
 /**
- * Decide cómo obtener el texto de un documento. Primero intenta el texto
- * nativo del PDF; si no alcanza el mínimo, el documento necesita OCR.
+ * Decide cómo obtener los datos de un documento:
+ * - XML: se lee el comprobante electrónico UBL directamente, sin IA.
+ * - PDF: se extrae el texto nativo; si no alcanza el mínimo, necesita OCR.
+ * - Imagen: necesita OCR.
  *
  * Implementa el puerto DocumentExtractor (src/application/ports/document-extractor.js).
  */
@@ -11,10 +17,18 @@ export class DocumentRouter {
     this.minTextChars = minTextChars;
   }
 
-  /**
-   * @returns {Promise<{ needsOcr: boolean, text: string | null, method: 'pdf_text' | null, pageCount: number | null, chars: number }>}
-   */
   async extractText({ filePath, mimeType }) {
+    if (mimeType === XML_MIME_TYPE) {
+      const buffer = await fs.promises.readFile(filePath);
+      return {
+        needsOcr: false,
+        text: null,
+        method: 'xml',
+        pageCount: null,
+        chars: buffer.length,
+        structured: parseUbl(buffer),
+      };
+    }
     if (mimeType !== 'application/pdf') {
       // Las imágenes siempre requieren OCR (disponible a partir de v0.2.0).
       return { needsOcr: true, text: null, method: null, pageCount: null, chars: 0 };

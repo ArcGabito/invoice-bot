@@ -34,6 +34,7 @@
     "commander": "^15.0.0",
     "csv-stringify": "^6.9.0",
     "dotenv": "^18.0.9",
+    "fast-xml-parser": "^5.11.2",
     "pdfjs-dist": "^6.4.299",
     "pino": "^10.4.0",
     "zod": "^4.6.7"

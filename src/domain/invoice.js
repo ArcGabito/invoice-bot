@@ -9,7 +9,22 @@ export const DOCUMENT_STATUS = Object.freeze({
   FAILED: 'failed',
   /** El documento no tiene texto suficiente; se procesará cuando haya OCR (v0.2.0). */
   NEEDS_OCR: 'needs_ocr',
+  /** No se procesa por diseño: representación impresa de un XML ya leído, CDR, etc. */
+  SKIPPED: 'skipped',
 });
+
+/** Motivos de DOCUMENT_STATUS.SKIPPED (documents.skip_reason). */
+export const SKIP_REASON = Object.freeze({
+  /** PDF con el mismo nombre que un XML ya extraído: sus datos vienen del XML. */
+  PRINTED_REPRESENTATION: 'printed_representation',
+  /** Constancia de recepción de SUNAT (ApplicationResponse). */
+  CDR: 'cdr',
+  /** XML que no es un comprobante UBL. */
+  UNSUPPORTED_XML: 'unsupported_xml',
+});
+
+/** De dónde salen los datos de una factura. */
+export const DATA_SOURCE = Object.freeze({ AI: 'ai', XML: 'xml' });
 
 export const VALIDATION_STATUS = Object.freeze({
   VALID: 'valid',

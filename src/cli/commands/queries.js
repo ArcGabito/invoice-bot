@@ -10,6 +10,7 @@ const DOCUMENT_STATUS_LABEL = {
   extracted: 'Extraídos',
   failed: 'Fallidos',
   needs_ocr: 'Requieren OCR',
+  skipped: 'Omitidos (PDF vinculados a su XML, CDR)',
 };
 
 export function registerStatus(program, run) {

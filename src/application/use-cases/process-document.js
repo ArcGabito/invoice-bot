@@ -1,5 +1,11 @@
 import { businessKey } from '../../domain/duplicate-detection.js';
-import { DOCUMENT_STATUS, SEVERITY, normalizeInvoice } from '../../domain/invoice.js';
+import {
+  DATA_SOURCE,
+  DOCUMENT_STATUS,
+  SEVERITY,
+  SKIP_REASON,
+  normalizeInvoice,
+} from '../../domain/invoice.js';
 import {
   VALIDATION_RULES_VERSION,
   statusFromIssues,
@@ -7,19 +13,20 @@ import {
 } from '../../domain/invoice-validation.js';
 import { DocumentReadError, ExtractionError } from '../../shared/errors.js';
 import { PROMPT_VERSION } from '../../infrastructure/ai/prompt.js';
+import { UBL_PARSER_VERSION } from '../../infrastructure/documents/ubl-parser.js';
 
 /** Reintentos inmediatos dentro de una misma ejecución cuando el JSON no es válido. */
 const INVALID_OUTPUT_RETRIES = 1;
 
 /**
- * Procesa un documento ya registrado: texto → IA → normalización →
- * validación → persistencia. Nunca lanza por un fallo del documento: lo
- * registra y devuelve el resultado, para que el lote continúe.
+ * Procesa un documento ya registrado: datos (XML o texto + IA) →
+ * normalización → validación → persistencia. Nunca lanza por un fallo del
+ * documento: lo registra y devuelve el resultado, para que el lote continúe.
  *
- * @returns {Promise<{ outcome: 'extracted' | 'needs_ocr' | 'failed', validationStatus?: string, possibleDuplicate?: boolean, error?: string }>}
+ * @returns {Promise<{ outcome: 'extracted' | 'needs_ocr' | 'failed' | 'skipped', validationStatus?: string, possibleDuplicate?: boolean, error?: string, reason?: string }>}
  */
 export async function processDocument({ document, filePath, deps }) {
-  const { repository, documentRouter, aiProvider, config, logger, today } = deps;
+  const { repository, documentRouter, config, logger, today } = deps;
   const log = logger.child({ document_id: document.id, sha: document.sha256.slice(0, 12) });
   const attempt = repository.startAttempt(document.id);
 
@@ -31,6 +38,16 @@ export async function processDocument({ document, filePath, deps }) {
     });
     log.warn({ kind }, 'documento fallido');
     return { outcome: 'failed', error: message, kind };
+  };
+  const skip = (reason, message) => {
+    repository.updateDocument(document.id, {
+      status: DOCUMENT_STATUS.SKIPPED,
+      skip_reason: reason,
+      error_message: message,
+      processed_at: new Date().toISOString(),
+    });
+    log.info({ reason }, 'documento omitido');
+    return { outcome: 'skipped', reason };
   };
 
   let extraction;
@@ -52,58 +69,46 @@ export async function processDocument({ document, filePath, deps }) {
     return { outcome: 'needs_ocr' };
   }
 
-  const baseRun = {
-    document_id: document.id,
-    attempt,
-    provider: aiProvider.name,
-    model: aiProvider.model,
-    prompt_version: PROMPT_VERSION,
-    text_method: extraction.method,
-    input_chars: extraction.text.length,
-  };
-
-  let result;
+  let data;
   let runId;
-  for (let tries = 0; ; tries++) {
-    const started = Date.now();
-    try {
-      result = await aiProvider.extract({ text: extraction.text, fileName: document.file_name });
-      runId = repository.insertExtractionRun({
-        ...baseRun,
-        model: result.model,
-        status: 'success',
-        raw_response: result.raw,
-        input_tokens: result.usage?.input_tokens,
-        output_tokens: result.usage?.output_tokens,
-        duration_ms: Date.now() - started,
-      });
-      break;
-    } catch (error) {
-      const err =
-        error instanceof ExtractionError
-          ? error
-          : new ExtractionError(error.message, { kind: 'unknown', cause: error });
-      repository.insertExtractionRun({
-        ...baseRun,
-        status: 'failed',
-        error_kind: err.kind,
-        error_message: err.message,
-        raw_response: err.rawResponse,
-        duration_ms: Date.now() - started,
-      });
-      if (err.kind === 'invalid_output' && tries < INVALID_OUTPUT_RETRIES) {
-        log.info('salida inválida, se repite la extracción');
-        continue;
-      }
-      return fail(err.kind, err.message);
+  let dataSource;
+  if (extraction.structured) {
+    const { structured } = extraction;
+    if (structured.kind === 'cdr') {
+      return skip(
+        SKIP_REASON.CDR,
+        'Constancia de recepción (CDR) de SUNAT: acompaña al comprobante, no es uno',
+      );
+    }
+    if (structured.kind === 'other') {
+      return skip(
+        SKIP_REASON.UNSUPPORTED_XML,
+        `XML que no es un comprobante UBL (raíz: ${structured.root})`,
+      );
+    }
+    data = structured.data;
+    dataSource = DATA_SOURCE.XML;
+    runId = repository.insertExtractionRun({
+      document_id: document.id,
+      attempt,
+      provider: 'ubl-xml',
+      prompt_version: UBL_PARSER_VERSION,
+      text_method: extraction.method,
+      input_chars: extraction.chars,
+      status: 'success',
+      duration_ms: 0,
+    });
+  } else {
+    const ai = await extractWithAi({ document, extraction, attempt, deps, log });
+    if (ai.error) return fail(ai.error.kind, ai.error.message);
+    ({ data, runId } = ai);
+    dataSource = DATA_SOURCE.AI;
+    if (!data.is_invoice) {
+      return fail('not_invoice', 'El modelo indica que el documento no es un comprobante de pago');
     }
   }
 
-  if (!result.data.is_invoice) {
-    return fail('not_invoice', 'El modelo indica que el documento no es un comprobante de pago');
-  }
-
-  const { invoice, normalizationIssues } = normalizeInvoice(result.data);
+  const { invoice, normalizationIssues } = normalizeInvoice(data);
   const validation = validateInvoice(invoice, {
     normalizationIssues,
     toleranceCents: config.amountToleranceCents,
@@ -122,9 +127,9 @@ export async function processDocument({ document, filePath, deps }) {
       actual_value: matches.map((m) => `#${m.document_id} ${m.file_name}`).join('; '),
     });
   }
-  for (const note of result.data.notes ?? []) {
+  for (const note of data.notes ?? []) {
     issues.push({
-      rule_code: 'MODEL_NOTE',
+      rule_code: dataSource === DATA_SOURCE.XML ? 'XML_NOTE' : 'MODEL_NOTE',
       severity: SEVERITY.INFO,
       message: note.slice(0, 500),
       expected_value: null,
@@ -140,8 +145,69 @@ export async function processDocument({ document, filePath, deps }) {
     validationStatus,
     rulesVersion: VALIDATION_RULES_VERSION,
     businessKey: key,
+    dataSource,
     issues,
   });
-  log.info({ validationStatus, issues: issues.length }, 'documento extraído');
-  return { outcome: 'extracted', validationStatus, possibleDuplicate: matches.length > 0 };
+  log.info({ validationStatus, issues: issues.length, dataSource }, 'documento extraído');
+  return {
+    outcome: 'extracted',
+    validationStatus,
+    dataSource,
+    possibleDuplicate: matches.length > 0,
+  };
+}
+
+/**
+ * Llama al proveedor de IA y registra cada intento. Repite una vez si la
+ * salida no cumple el esquema; los demás errores se devuelven sin reintentar.
+ */
+async function extractWithAi({ document, extraction, attempt, deps, log }) {
+  const { repository, aiProvider } = deps;
+  const baseRun = {
+    document_id: document.id,
+    attempt,
+    provider: aiProvider.name,
+    model: aiProvider.model,
+    prompt_version: PROMPT_VERSION,
+    text_method: extraction.method,
+    input_chars: extraction.text.length,
+  };
+
+  for (let tries = 0; ; tries++) {
+    const started = Date.now();
+    try {
+      const result = await aiProvider.extract({
+        text: extraction.text,
+        fileName: document.file_name,
+      });
+      const runId = repository.insertExtractionRun({
+        ...baseRun,
+        model: result.model,
+        status: 'success',
+        raw_response: result.raw,
+        input_tokens: result.usage?.input_tokens,
+        output_tokens: result.usage?.output_tokens,
+        duration_ms: Date.now() - started,
+      });
+      return { data: result.data, runId };
+    } catch (error) {
+      const err =
+        error instanceof ExtractionError
+          ? error
+          : new ExtractionError(error.message, { kind: 'unknown', cause: error });
+      repository.insertExtractionRun({
+        ...baseRun,
+        status: 'failed',
+        error_kind: err.kind,
+        error_message: err.message,
+        raw_response: err.rawResponse,
+        duration_ms: Date.now() - started,
+      });
+      if (err.kind === 'invalid_output' && tries < INVALID_OUTPUT_RETRIES) {
+        log.info('salida inválida, se repite la extracción');
+        continue;
+      }
+      return { error: { kind: err.kind, message: err.message } };
+    }
+  }
 }

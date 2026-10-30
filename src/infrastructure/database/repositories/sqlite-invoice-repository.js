@@ -1,4 +1,4 @@
-import { AMOUNT_FIELDS, DOCUMENT_STATUS } from '../../../domain/invoice.js';
+import { AMOUNT_FIELDS, DATA_SOURCE, DOCUMENT_STATUS } from '../../../domain/invoice.js';
 
 const INVOICE_COLUMNS = [
   'supplier_name',
@@ -12,6 +12,7 @@ const INVOICE_COLUMNS = [
   'due_date',
   'currency',
   ...AMOUNT_FIELDS.map((f) => `${f}_cents`),
+  'data_source',
 ];
 
 const now = () => new Date().toISOString();
@@ -34,6 +35,18 @@ export class SqliteInvoiceRepository {
 
   getDocument(id) {
     return this.db.prepare('SELECT * FROM documents WHERE id = ?').get(id) ?? null;
+  }
+
+  /** Documento visto por última vez en `filePath` (según file_occurrences). */
+  findDocumentByPath(filePath) {
+    return (
+      this.db
+        .prepare(
+          `SELECT d.* FROM file_occurrences o JOIN documents d ON d.id = o.document_id
+           WHERE o.file_path = ?`,
+        )
+        .get(filePath) ?? null
+    );
   }
 
   insertDocument({ sha256, file_path, file_name, mime_type, file_size }) {
@@ -95,6 +108,8 @@ export class SqliteInvoiceRepository {
       'page_count',
       'error_kind',
       'error_message',
+      'skip_reason',
+      'linked_document_id',
       'processed_at',
       'file_path',
       'file_name',
@@ -167,6 +182,7 @@ export class SqliteInvoiceRepository {
     validationStatus,
     rulesVersion,
     businessKey,
+    dataSource = DATA_SOURCE.AI,
     issues,
   }) {
     const ts = now();
@@ -175,7 +191,8 @@ export class SqliteInvoiceRepository {
         .prepare('SELECT id FROM invoices WHERE document_id = ?')
         .pluck()
         .get(documentId);
-      const values = INVOICE_COLUMNS.map((c) => invoice[c] ?? null);
+      const row = { ...invoice, data_source: dataSource };
+      const values = INVOICE_COLUMNS.map((c) => row[c] ?? null);
       let invoiceId;
       if (existing) {
         const sets = INVOICE_COLUMNS.map((c) => `${c} = ?`).join(', ');
@@ -332,7 +349,8 @@ export class SqliteInvoiceRepository {
 
   /**
    * Facturas para exportar. Por defecto excluye las repeticiones de una misma
-   * clave de negocio (conserva la primera registrada).
+   * clave de negocio: conserva la leída de un XML si existe (datos exactos)
+   * y, si no, la primera registrada.
    */
   listInvoicesForExport({
     month = null,
@@ -361,7 +379,8 @@ export class SqliteInvoiceRepository {
     }
     if (!includeDuplicates) {
       where.push(
-        `(i.business_key IS NULL OR i.id = (SELECT MIN(i2.id) FROM invoices i2 WHERE i2.business_key = i.business_key))`,
+        `(i.business_key IS NULL OR i.id = (SELECT i2.id FROM invoices i2 WHERE i2.business_key = i.business_key
+           ORDER BY CASE i2.data_source WHEN 'xml' THEN 0 ELSE 1 END, i2.id LIMIT 1))`,
       );
     }
     const sql = `SELECT i.*, d.file_name, d.file_path, d.sha256,
