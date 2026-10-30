@@ -8,7 +8,8 @@
     "start": "node bin/invoicebot.js",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "samples": "node scripts/generate-sample-invoices.js"
   },
   "author": "",
   "license": "MIT",

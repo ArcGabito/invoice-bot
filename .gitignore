@@ -12,6 +12,7 @@ node_modules/
 /data/
 /exports/
 /facturas/
+/facturas-demo/
 /invoices/
 /logs/
 *.db

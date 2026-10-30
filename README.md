@@ -1,5 +1,7 @@
 # InvoiceBot
 
+![Wallpaper](https://media.gabito.dev/imagenes/1793201727477-invoice-bot-wallpaper.png)
+
 Automatización inteligente de facturas mediante extracción de texto, LLM y validación contable local.
 
 InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee comprobantes de pago peruanos, extrae sus datos con un modelo de IA, **comprueba con código determinista** que sean coherentes, detecta duplicados y guarda todo en una base de datos SQLite local, con trazabilidad de cada resultado.
@@ -153,12 +155,11 @@ El IGV no se calcula sobre todo el subtotal cuando hay operaciones exoneradas o 
 npm test          # Vitest: unitarias, integración (SQLite + PDF) y CLI de extremo a extremo
 npm run lint      # ESLint
 npm run format    # Prettier
+npm run samples   # crea comprobantes ficticios en ./facturas-demo para probar la CLI
 ```
 
 Las pruebas generan sus propios PDFs ficticios en directorios temporales; no necesitan facturas reales ni conexión. El proyecto incluye `invoice-bot.slnx` para abrirlo en Visual Studio y configuraciones de depuración en `.vscode/launch.json`.
 
-La arquitectura por capas está descrita en [docs/architecture.md](docs/architecture.md).
-
 ## Licencia
 
-[MIT](LICENSE)
+[MIT](LICENSE.md)
