@@ -26,6 +26,7 @@ export const CSV_COLUMNS = Object.freeze([
   'file_name',
   'sha256',
   'data_source',
+  'sunat_status',
 ]);
 
 export function invoiceToCsvRecord(row) {

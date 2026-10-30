@@ -33,6 +33,7 @@ Las columnas, su orden y sus nombres son estables dentro de una versión mayor. 
 | `file_name` | texto | Nombre del archivo original. |
 | `sha256` | hex | Huella del archivo original. |
 | `data_source` | `xml`, `ai` | Origen de los datos: el XML del comprobante electrónico (exacto) o la extracción con IA desde el PDF (propuesta, validada). Añadida en v0.2.0. |
+| `sunat_status` | texto o vacío | Último estado del comprobante según la consulta de validez de SUNAT: `ACEPTADO`, `AUTORIZADO`, `ANULADO`, `NO EXISTE` o `NO AUTORIZADO`. Vacío si no se ha consultado (`invoicebot verify-sunat`). Añadida en v0.2.0. |
 
 **Importes**: punto como separador decimal, dos decimales, sin separador de miles ni símbolo de moneda (`1234.50`). Un campo vacío significa que el dato no aparece en el comprobante; no equivale a cero.
 

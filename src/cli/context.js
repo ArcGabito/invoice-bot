@@ -4,6 +4,7 @@ import { SqliteInvoiceRepository } from '../infrastructure/database/repositories
 import { DocumentRouter } from '../infrastructure/documents/document-router.js';
 import { createAiProvider } from '../infrastructure/ai/provider-factory.js';
 import { createLogger } from '../infrastructure/logging/logger.js';
+import { createSunatClient } from '../infrastructure/sunat/sunat-client.js';
 
 /**
  * Raíz de composición: crea las dependencias reales a partir de la
@@ -22,6 +23,7 @@ export function createContext(globalOptions = {}) {
   let db;
   let repository;
   let aiProvider;
+  let sunatClient;
 
   return {
     config,
@@ -37,6 +39,10 @@ export function createContext(globalOptions = {}) {
     get aiProvider() {
       aiProvider ??= createAiProvider(config);
       return aiProvider;
+    },
+    get sunatClient() {
+      sunatClient ??= createSunatClient(config);
+      return sunatClient;
     },
     documentRouter: new DocumentRouter({ minTextChars: config.minTextChars }),
     get today() {

@@ -1,4 +1,6 @@
 import { AMOUNT_FIELDS, DATA_SOURCE, DOCUMENT_STATUS } from '../../../domain/invoice.js';
+import { statusFromIssues } from '../../../domain/invoice-validation.js';
+import { SUNAT_RULE_PREFIX } from '../../../domain/sunat-status.js';
 
 const INVOICE_COLUMNS = [
   'supplier_name',
@@ -199,7 +201,8 @@ export class SqliteInvoiceRepository {
         this.db
           .prepare(
             `UPDATE invoices SET ${sets}, extraction_run_id = ?, business_key = ?, validation_status = ?,
-               rules_version = ?, updated_at = ? WHERE id = ?`,
+               rules_version = ?, updated_at = ?, sunat_status = NULL, sunat_checked_at = NULL
+             WHERE id = ?`,
           )
           .run(
             ...values,
@@ -402,5 +405,94 @@ export class SqliteInvoiceRepository {
          ORDER BY CASE i.validation_status WHEN 'error' THEN 0 ELSE 1 END, i.id`,
       )
       .all();
+  }
+
+  // --- SUNAT ---------------------------------------------------------------
+
+  /**
+   * Facturas con los datos necesarios para consultarlas en SUNAT. Sin `force`,
+   * solo las nunca consultadas con éxito y las que SUNAT aún no tenía
+   * informadas (una boleta puede tardar días en aparecer).
+   */
+  listInvoicesForSunatCheck({ month = null, documentTypes, force = false, limit = null }) {
+    const where = [
+      'supplier_ruc IS NOT NULL',
+      'series IS NOT NULL',
+      'number IS NOT NULL',
+      'issue_date IS NOT NULL',
+      `document_type IN (${documentTypes.map(() => '?').join(', ')})`,
+    ];
+    const params = [...documentTypes];
+    if (month) {
+      where.push('issue_date LIKE ?');
+      params.push(`${month}-%`);
+    }
+    if (!force) where.push("(sunat_checked_at IS NULL OR sunat_status = 'NO EXISTE')");
+    const sql = `SELECT * FROM invoices WHERE ${where.join(' AND ')} ORDER BY issue_date, id
+      ${limit ? `LIMIT ${Number(limit)}` : ''}`;
+    return this.db.prepare(sql).all(...params);
+  }
+
+  /**
+   * Registra una consulta a SUNAT. Si fue correcta, reemplaza las incidencias
+   * SUNAT_* anteriores por las nuevas, guarda el estado del comprobante y
+   * recalcula el estado de validación con todas las incidencias abiertas.
+   */
+  recordSunatCheck({ invoiceId, result = null, error = null, receiptStatus = null, issues = [] }) {
+    const ts = now();
+    return this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO sunat_checks (invoice_id, status, estado_cp, estado_ruc, cond_domi_ruc, observations,
+             error_kind, error_message, raw_response, checked_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          invoiceId,
+          error ? 'failed' : 'success',
+          result?.estadoCp ?? null,
+          result?.estadoRuc ?? null,
+          result?.condDomiRuc ?? null,
+          result ? JSON.stringify(result.observaciones) : null,
+          error?.kind ?? null,
+          error?.message ?? null,
+          result ? JSON.stringify(result.raw) : null,
+          ts,
+        );
+      if (error) return null;
+
+      this.db
+        .prepare(
+          `DELETE FROM validation_issues WHERE invoice_id = ? AND substr(rule_code, 1, 6) = ?`,
+        )
+        .run(invoiceId, SUNAT_RULE_PREFIX);
+      const insertIssue = this.db.prepare(
+        `INSERT INTO validation_issues (invoice_id, rule_code, severity, message, expected_value, actual_value)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      for (const i of issues) {
+        insertIssue.run(
+          invoiceId,
+          i.rule_code,
+          i.severity,
+          i.message,
+          i.expected_value,
+          i.actual_value,
+        );
+      }
+      const open = this.db
+        .prepare(
+          'SELECT severity FROM validation_issues WHERE invoice_id = ? AND resolved_at IS NULL',
+        )
+        .all(invoiceId);
+      const validationStatus = statusFromIssues(open);
+      this.db
+        .prepare(
+          `UPDATE invoices SET sunat_status = ?, sunat_checked_at = ?, validation_status = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(receiptStatus, ts, validationStatus, ts, invoiceId);
+      return validationStatus;
+    })();
   }
 }

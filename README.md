@@ -15,6 +15,7 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 | Escaneo de carpetas (XML, PDF, PNG, JPG), SHA-256 e idempotencia | ✅ |
 | Lectura de comprobantes electrónicos SUNAT en XML UBL 2.1, sin IA | ✅ |
 | Vinculación del PDF (representación impresa) con su XML; omisión de CDR | ✅ |
+| Verificación en SUNAT: comprobante aceptado/anulado/no existe y RUC emisor activo/habido | ✅ |
 | Extracción de texto nativo de PDF | ✅ |
 | Extracción con IA: Claude (Anthropic), Ollama (local) o simulado | ✅ |
 | Validación: RUC (módulo 11), fechas, moneda, serie, aritmética tributaria, IGV | ✅ |
@@ -85,6 +86,7 @@ Base de datos: C:\...\invoice-bot\data\invoicebot.db
 | `invoicebot review` | Facturas con errores o advertencias, documentos fallidos y pendientes de OCR. |
 | `invoicebot retry --failed` | Reintenta documentos fallidos (errores transitorios o salidas inválidas). |
 | `invoicebot retry --pending` | Recupera documentos de una ejecución interrumpida. |
+| `invoicebot verify-sunat` | Consulta en SUNAT si cada comprobante es válido y el estado del RUC emisor. |
 | `invoicebot doctor` | Comprueba Node.js, SQLite, lectura de PDF, OCR y conexión con la IA. |
 | `invoicebot config` | Muestra la configuración efectiva sin revelar secretos. |
 
@@ -146,7 +148,30 @@ Las incidencias se guardan individualmente en `validation_issues`. Una factura c
 
 El IGV no se calcula sobre todo el subtotal cuando hay operaciones exoneradas o inafectas: se usa el desglose tributario del comprobante. La aritmética se hace con enteros en céntimos y una tolerancia explícita (`INVOICEBOT_AMOUNT_TOLERANCE`, 0.02 por defecto).
 
-> Validar matemáticamente un RUC **no** confirma que la empresa exista, esté activa ni que el comprobante sea auténtico. Eso requiere consultar fuentes autorizadas (SUNAT) y será una funcionalidad independiente.
+> Validar matemáticamente un RUC **no** confirma que la empresa exista, esté activa ni que el comprobante sea auténtico. Para eso está `invoicebot verify-sunat`.
+
+### Verificación en SUNAT
+
+`invoicebot verify-sunat` usa el servicio oficial de SUNAT **Consulta Integrada de Comprobante de Pago** para confirmar cada comprobante registrado. Una sola consulta devuelve:
+
+| Dato | Resultado en InvoiceBot |
+| --- | --- |
+| Estado del comprobante: ACEPTADO, AUTORIZADO | Sin incidencias |
+| ANULADO (comunicado de baja) o NO AUTORIZADO (físico sin autorización de imprenta) | error |
+| NO EXISTE (no informado a SUNAT) | error en facturas; advertencia en boletas, que llegan en el resumen diario y pueden tardar días |
+| Estado del RUC emisor distinto de ACTIVO (baja, suspensión…) | advertencia |
+| Domicilio del emisor NO HABIDO o NO HALLADO | advertencia: revisa con tu contador el crédito fiscal |
+| Observaciones de SUNAT | información |
+
+```bash
+invoicebot verify-sunat                    # comprobantes sin verificar y los aún no informados
+invoicebot verify-sunat --month 2026-10
+invoicebot verify-sunat --force --limit 50 # vuelve a consultar también los ya verificados
+```
+
+Las incidencias de SUNAT se suman a las de validación y recalculan el estado de la factura: un comprobante anulado deja de exportarse por defecto. El resultado de cada consulta queda en la tabla `sunat_checks` y el último estado en la columna `sunat_status` del CSV. Las consultas son secuenciales; un fallo de red se registra y se reintenta en la siguiente ejecución, y unas credenciales inválidas detienen el lote.
+
+**Credenciales**: entra en SUNAT Operaciones en Línea con la Clave SOL de tu empresa → *Credenciales de API SUNAT*, registra una aplicación y copia su `client_id` y `client_secret` en `.env` (`INVOICEBOT_SUNAT_RUC`, `INVOICEBOT_SUNAT_CLIENT_ID`, `INVOICEBOT_SUNAT_CLIENT_SECRET`). Comprueba la conexión con `invoicebot doctor`. Referencia: [Manual de Consulta Integrada de Comprobante de Pago por Servicio Web](https://cpe.sunat.gob.pe/sites/default/files/inline-files/Manual-de-Consulta-Integrada-de-Comprobante-de-Pago-por-ServicioWEB_v2_0.pdf).
 
 ## Seguridad y privacidad
 
@@ -155,6 +180,7 @@ El IGV no se calcula sobre todo el subtotal cuando hay operaciones exoneradas o 
 - Los logs van a stderr y no incluyen el texto de las facturas.
 - El contenido de cada documento se envía al modelo delimitado como datos, con instrucciones explícitas de ignorar cualquier orden que contenga.
 - Con `INVOICEBOT_AI_PROVIDER=ollama`, ningún documento sale del equipo.
+- `verify-sunat` envía a SUNAT solo los identificadores de cada comprobante (RUC emisor, tipo, serie, número, fecha y total), nunca el documento.
 
 ## Desarrollo
 

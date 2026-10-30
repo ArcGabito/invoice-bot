@@ -26,6 +26,13 @@ export function registerConfig(program, run) {
         }
         if (c.aiProvider === 'ollama')
           out.line(`  Ollama:             ${c.ollama.url} · ${c.ollama.model}`);
+        out.line(
+          `SUNAT (validez):      ${
+            c.sunat.ruc
+              ? `RUC ${c.sunat.ruc} · client_id ${c.sunat.clientId ? 'definido' : 'no definido'} · client_secret ${c.sunat.clientSecretSet ? 'definido' : 'no definido'}`
+              : 'no configurado (opcional)'
+          }`,
+        );
         out.line(`Directorio de datos:  ${c.dataDir}`);
         out.line(`Base de datos:        ${c.dbPath}`);
         out.line(`Exportaciones:        ${c.exportDir}`);
@@ -88,6 +95,17 @@ export function registerDoctor(program, run) {
         );
         if (!options.offline) {
           await check(`Proveedor de IA (${ctx.config.aiProvider})`, () => ctx.aiProvider.ping());
+        }
+        if (!ctx.config.sunat.ruc && !ctx.config.sunat.clientId) {
+          await check(
+            'API SUNAT',
+            () => {
+              throw new Error('no configurada (opcional; necesaria para invoicebot verify-sunat)');
+            },
+            { optional: true },
+          );
+        } else if (!options.offline) {
+          await check('API SUNAT', () => ctx.sunatClient.ping());
         }
 
         out.data(checks);

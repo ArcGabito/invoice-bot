@@ -17,6 +17,15 @@ const ConfigSchema = z.object({
     url: z.url(),
     model: z.string().min(1),
   }),
+  sunat: z.object({
+    /** RUC de la empresa que consulta (el de las credenciales de API SUNAT). */
+    ruc: z
+      .string()
+      .regex(/^\d{11}$/, 'debe tener 11 dígitos')
+      .nullable(),
+    clientId: z.string().min(1).nullable(),
+    clientSecretSet: z.boolean(),
+  }),
   dataDir: z.string().min(1),
   dbPath: z.string().min(1),
   exportDir: z.string().min(1),
@@ -62,6 +71,11 @@ export function loadConfig({
     ollama: {
       url: env.INVOICEBOT_OLLAMA_URL || 'http://127.0.0.1:11434',
       model: env.INVOICEBOT_OLLAMA_MODEL || 'qwen3:8b',
+    },
+    sunat: {
+      ruc: env.INVOICEBOT_SUNAT_RUC || null,
+      clientId: env.INVOICEBOT_SUNAT_CLIENT_ID || null,
+      clientSecretSet: Boolean(env.INVOICEBOT_SUNAT_CLIENT_SECRET),
     },
     dataDir,
     dbPath: path.resolve(dataDir, overrides.dbFile ?? env.INVOICEBOT_DB_FILE ?? 'invoicebot.db'),

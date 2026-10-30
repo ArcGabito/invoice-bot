@@ -12,10 +12,14 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - Columna `data_source` (`xml` o `ai`) en facturas y en el CSV; al exportar posibles duplicados se prefiere el XML.
 - Copia de seguridad automática en `data/backups/` antes de migrar una base de datos con datos.
 - `npm run samples` genera comprobantes ficticios, incluido un XML con su PDF y su CDR.
+- Comando `verify-sunat`: consulta el servicio oficial de SUNAT (Consulta Integrada de Comprobante de Pago) para saber si cada comprobante está aceptado, anulado o no informado, y si el RUC emisor está activo y habido. Las respuestas generan incidencias `SUNAT_*` que recalculan el estado de la factura; cada consulta queda en `sunat_checks`.
+- Columna `sunat_status` en facturas y en el CSV.
+- `doctor` y `config` muestran la configuración de la API SUNAT (opcional).
 
 ### Cambiado
 
 - Migración 002: nuevo estado de documento `skipped`, método `xml` y campos `skip_reason` y `linked_document_id`. Las migraciones se ejecutan con las claves foráneas desactivadas y verifican la integridad al terminar.
+- Migración 003: tabla `sunat_checks` y columnas `sunat_status` y `sunat_checked_at` en facturas. Volver a extraer una factura borra su estado de SUNAT para que se consulte de nuevo.
 
 ## [0.1.0] - 2026-10-28
 
