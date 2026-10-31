@@ -59,21 +59,57 @@ export async function processDocument({ document, filePath, deps }) {
     return fail('text_extraction', error.message);
   }
 
+  // Sin texto legible: con visión de Claude, el documento se envía tal cual.
+  const useVision = extraction.needsOcr && Boolean(deps.visionExtractor);
   repository.updateDocument(document.id, {
-    text_method: extraction.method,
+    text_method: useVision ? 'ocr' : extraction.method,
     text_chars: extraction.chars,
     page_count: extraction.pageCount,
   });
-  if (extraction.needsOcr) {
-    repository.updateDocument(document.id, { status: DOCUMENT_STATUS.NEEDS_OCR });
-    log.info({ chars: extraction.chars }, 'sin texto suficiente: requiere OCR');
+  if (extraction.needsOcr && !useVision) {
+    repository.updateDocument(document.id, {
+      status: DOCUMENT_STATUS.NEEDS_OCR,
+      error_message: extraction.ocrAttempted
+        ? 'El OCR no encontró texto legible: revisa la calidad de la imagen o del escaneo'
+        : null,
+    });
+    log.info(
+      { chars: extraction.chars, ocrAttempted: Boolean(extraction.ocrAttempted) },
+      'sin texto suficiente: requiere OCR',
+    );
     return { outcome: 'needs_ocr' };
   }
 
   let data;
   let runId;
   let dataSource;
-  if (extraction.structured) {
+  if (useVision) {
+    const vision = deps.visionExtractor;
+    const ai = await extractWithAi({
+      document,
+      attempt,
+      deps,
+      log,
+      run: {
+        provider: `${vision.name}-vision`,
+        model: vision.model,
+        prompt_version: PROMPT_VERSION,
+        text_method: 'ocr',
+      },
+      call: () =>
+        vision.extractFromFile({
+          filePath,
+          mimeType: document.mime_type,
+          fileName: document.file_name,
+        }),
+    });
+    if (ai.error) return fail(ai.error.kind, ai.error.message);
+    ({ data, runId } = ai);
+    dataSource = DATA_SOURCE.AI;
+    if (!data.is_invoice && !hasInvoiceData(data)) {
+      return fail('not_invoice', 'El modelo indica que el documento no es un comprobante de pago');
+    }
+  } else if (extraction.structured) {
     const { structured } = extraction;
     if (structured.kind === 'cdr') {
       return skip(
@@ -100,7 +136,26 @@ export async function processDocument({ document, filePath, deps }) {
       duration_ms: 0,
     });
   } else {
-    const ai = await extractWithAi({ document, extraction, attempt, deps, log });
+    const { aiProvider } = deps;
+    const ai = await extractWithAi({
+      document,
+      attempt,
+      deps,
+      log,
+      run: {
+        provider: aiProvider.name,
+        model: aiProvider.model,
+        prompt_version: PROMPT_VERSION,
+        text_method: extraction.method,
+        input_chars: extraction.text.length,
+      },
+      call: () =>
+        aiProvider.extract({
+          text: extraction.text,
+          fileName: document.file_name,
+          ocr: extraction.method === 'ocr',
+        }),
+    });
     if (ai.error) return fail(ai.error.kind, ai.error.message);
     ({ data, runId } = ai);
     dataSource = DATA_SOURCE.AI;
@@ -117,7 +172,7 @@ export async function processDocument({ document, filePath, deps }) {
     toleranceCents: config.amountToleranceCents,
     today,
   });
-  const issues = [...validation.issues];
+  const issues = [...validation.issues, ...ocrIssues({ extraction, useVision, config })];
   if (dataSource === DATA_SOURCE.AI && !data.is_invoice) {
     issues.push({
       rule_code: 'MODEL_DOUBTED_INVOICE',
@@ -171,28 +226,57 @@ export async function processDocument({ document, filePath, deps }) {
 }
 
 /**
- * Llama al proveedor de IA y registra cada intento. Repite una vez si la
- * salida no cumple el esquema; los demás errores se devuelven sin reintentar.
+ * Incidencias que dejan constancia de que los datos salieron de una imagen:
+ * una nota informativa siempre y una advertencia si la confianza del OCR es
+ * baja, para que una persona compare con el documento.
  */
-async function extractWithAi({ document, extraction, attempt, deps, log }) {
-  const { repository, aiProvider } = deps;
-  const baseRun = {
-    document_id: document.id,
-    attempt,
-    provider: aiProvider.name,
-    model: aiProvider.model,
-    prompt_version: PROMPT_VERSION,
-    text_method: extraction.method,
-    input_chars: extraction.text.length,
-  };
+function ocrIssues({ extraction, useVision, config }) {
+  if (useVision) {
+    return [
+      {
+        rule_code: 'OCR_SOURCE',
+        severity: SEVERITY.INFO,
+        message: 'Datos leídos de la imagen con visión (Claude), sin texto nativo',
+        expected_value: null,
+        actual_value: null,
+      },
+    ];
+  }
+  if (extraction.method !== 'ocr' || !extraction.ocr) return [];
+  const { engine, confidence } = extraction.ocr;
+  const issues = [
+    {
+      rule_code: 'OCR_SOURCE',
+      severity: SEVERITY.INFO,
+      message: `Datos leídos por OCR (${engine}) de una imagen o un escaneo`,
+      expected_value: null,
+      actual_value: `confianza ${confidence} %`,
+    },
+  ];
+  if (confidence < config.ocr.minConfidence) {
+    issues.push({
+      rule_code: 'OCR_LOW_CONFIDENCE',
+      severity: SEVERITY.WARNING,
+      message: 'El OCR leyó el documento con poca confianza: compara los datos con la imagen',
+      expected_value: `>= ${config.ocr.minConfidence} %`,
+      actual_value: `${confidence} %`,
+    });
+  }
+  return issues;
+}
+
+/**
+ * Llama a la IA (`call`) y registra cada intento en extraction_runs. Repite una
+ * vez si la salida no cumple el esquema; los demás errores se devuelven sin reintentar.
+ */
+async function extractWithAi({ document, attempt, deps, log, run, call }) {
+  const { repository } = deps;
+  const baseRun = { document_id: document.id, attempt, ...run };
 
   for (let tries = 0; ; tries++) {
     const started = Date.now();
     try {
-      const result = await aiProvider.extract({
-        text: extraction.text,
-        fileName: document.file_name,
-      });
+      const result = await call();
       const runId = repository.insertExtractionRun({
         ...baseRun,
         model: result.model,

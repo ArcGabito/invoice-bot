@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { MockProvider } from '../../src/infrastructure/ai/providers/mock-provider.js';
 import {
   OllamaProvider,
@@ -190,5 +193,86 @@ describe('AnthropicProvider', () => {
     const error = await provider.extract({ text: 'x', fileName: 'f' }).catch((e) => e);
     expect(error).toBeInstanceOf(ExtractionError);
     expect(error).toMatchObject({ kind: 'refused', retryable: false });
+  });
+
+  describe('lectura con visión', () => {
+    const okResponse = () => {
+      const parsed = nullExtraction();
+      return {
+        model: 'claude-opus-5-5',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: JSON.stringify(parsed) }],
+        parsed_output: parsed,
+        usage: {},
+      };
+    };
+    let dir;
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'invoicebot-vision-'));
+    });
+    afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    it('adjunta un PDF como documento y una imagen como imagen, en base64', async () => {
+      const pdf = path.join(dir, 'escaneo.pdf');
+      const jpg = path.join(dir, 'foto.jpg');
+      fs.writeFileSync(pdf, '%PDF-1.4 prueba');
+      fs.writeFileSync(jpg, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+      const client = fakeClient(okResponse());
+      const provider = new AnthropicProvider({
+        model: 'claude-opus-5-5',
+        effort: 'medium',
+        client,
+      });
+
+      await provider.extractFromFile({
+        filePath: pdf,
+        mimeType: 'application/pdf',
+        fileName: 'escaneo.pdf',
+      });
+      await provider.extractFromFile({
+        filePath: jpg,
+        mimeType: 'image/jpeg',
+        fileName: 'foto.jpg',
+      });
+
+      const [first, second] = client.beta.messages.parse.mock.calls.map(
+        ([params]) => params.messages[0].content,
+      );
+      expect(first[0]).toEqual({
+        type: 'document',
+        source: {
+          type: 'base64',
+          media_type: 'application/pdf',
+          data: Buffer.from('%PDF-1.4 prueba').toString('base64'),
+        },
+      });
+      expect(first[1]).toMatchObject({
+        type: 'text',
+        text: expect.stringContaining('escaneo.pdf'),
+      });
+      expect(second[0]).toMatchObject({ type: 'image', source: { media_type: 'image/jpeg' } });
+    });
+
+    it('rechaza sin llamar a la API una imagen que supera el límite', async () => {
+      const big = path.join(dir, 'grande.png');
+      fs.writeFileSync(big, Buffer.alloc(5 * 1024 * 1024 + 1));
+      const client = fakeClient(okResponse());
+      const provider = new AnthropicProvider({
+        model: 'claude-opus-5-5',
+        effort: 'medium',
+        client,
+      });
+      await expect(
+        provider.extractFromFile({ filePath: big, mimeType: 'image/png', fileName: 'grande.png' }),
+      ).rejects.toMatchObject({ kind: 'file_too_large', retryable: false });
+      expect(client.beta.messages.parse).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('prompt para texto de OCR', () => {
+  it('avisa al modelo de que el texto viene de un OCR', () => {
+    expect(buildUserPrompt({ text: 'x', fileName: 'f.png', ocr: true })).toMatch(/OCR/);
+    expect(buildUserPrompt({ text: 'x', fileName: 'f.pdf' })).not.toMatch(/OCR/);
   });
 });

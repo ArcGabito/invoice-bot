@@ -1,8 +1,13 @@
+import fs from 'node:fs';
 import Anthropic from '@anthropic-ai/sdk';
 import { betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod';
 import { ExtractionError } from '../../../shared/errors.js';
 import { ExtractionSchema } from '../extraction-schema.js';
-import { SYSTEM_PROMPT, buildUserPrompt } from '../prompt.js';
+import { SYSTEM_PROMPT, buildUserPrompt, buildVisionPrompt } from '../prompt.js';
+
+/** Límites de la API para adjuntos (las imágenes, más estrictos que los PDF). */
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_PDF_BYTES = 30 * 1024 * 1024;
 
 /**
  * Proveedor Claude (Anthropic) con salida estructurada validada por Zod.
@@ -20,7 +25,30 @@ export class AnthropicProvider {
     this.client = client;
   }
 
-  async extract({ text, fileName }) {
+  async extract({ text, fileName, ocr = false }) {
+    return this.request(buildUserPrompt({ text, fileName, ocr }));
+  }
+
+  /**
+   * Lectura con visión: envía la imagen o el PDF tal cual, sin OCR previo.
+   * Útil para fotos difíciles; el documento sale del equipo hacia Anthropic.
+   */
+  async extractFromFile({ filePath, mimeType, fileName }) {
+    const buffer = await fs.promises.readFile(filePath);
+    const limit = mimeType === 'application/pdf' ? MAX_PDF_BYTES : MAX_IMAGE_BYTES;
+    if (buffer.length > limit) {
+      throw new ExtractionError(
+        `El archivo pesa ${(buffer.length / 1048576).toFixed(1)} MB; el máximo para la lectura con visión es ${limit / 1048576} MB`,
+        { kind: 'file_too_large', retryable: false },
+      );
+    }
+    const source = { type: 'base64', media_type: mimeType, data: buffer.toString('base64') };
+    const attachment =
+      mimeType === 'application/pdf' ? { type: 'document', source } : { type: 'image', source };
+    return this.request([attachment, { type: 'text', text: buildVisionPrompt({ fileName }) }]);
+  }
+
+  async request(content) {
     let response;
     try {
       response = await this.client.beta.messages.parse({
@@ -33,7 +61,7 @@ export class AnthropicProvider {
           effort: this.effort,
           format: betaZodOutputFormat(ExtractionSchema),
         },
-        messages: [{ role: 'user', content: buildUserPrompt({ text, fileName }) }],
+        messages: [{ role: 'user', content }],
       });
     } catch (error) {
       throw toExtractionError(error);

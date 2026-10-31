@@ -69,6 +69,18 @@ const ConfigSchema = z.object({
       .min(1)
       .max(24 * 30),
   }),
+  ocr: z.object({
+    /** tesseract: local y sin internet · claude: visión de Claude (el documento sale del equipo) · none: desactivado. */
+    engine: z.enum(['tesseract', 'claude', 'none']),
+    languages: z
+      .array(z.string().regex(/^[a-z_]{3,8}$/, 'código de idioma de Tesseract, p. ej. spa'))
+      .min(1),
+    languageDir: z.string().min(1),
+    maxPages: z.int().min(1).max(20),
+    scale: z.number().min(1).max(6),
+    /** Por debajo de esta confianza (0-100) la factura queda con advertencia para revisión. */
+    minConfidence: z.int().min(0).max(100),
+  }),
   /** Pantalla de revisión local (`invoicebot serve`); solo escucha en 127.0.0.1. */
   serve: z.object({ port: z.int().min(1024).max(65535) }),
   /** Ejecución desatendida (`invoicebot run`). */
@@ -161,6 +173,14 @@ export function loadConfig({
       dir: path.resolve(cwd, env.INVOICEBOT_BACKUP_DIR || path.join(dataDir, 'backups')),
       retention: intFrom(env.INVOICEBOT_BACKUP_RETENTION, 14),
       intervalHours: intFrom(env.INVOICEBOT_BACKUP_INTERVAL_HOURS, 24),
+    },
+    ocr: {
+      engine: (env.INVOICEBOT_OCR_ENGINE || 'tesseract').toLowerCase(),
+      languages: (env.INVOICEBOT_OCR_LANGUAGES || 'spa,eng').split(/[,+ ]+/).filter(Boolean),
+      languageDir: path.join(dataDir, 'ocr'),
+      maxPages: intFrom(env.INVOICEBOT_OCR_MAX_PAGES, 3),
+      scale: env.INVOICEBOT_OCR_SCALE ? Number(env.INVOICEBOT_OCR_SCALE) : 3,
+      minConfidence: intFrom(env.INVOICEBOT_OCR_MIN_CONFIDENCE, 70),
     },
     serve: { port: intFrom(env.INVOICEBOT_SERVE_PORT, 4317) },
     run: {

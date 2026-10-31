@@ -2,6 +2,23 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
 
+## [0.3.0] - 2026-10-31
+
+### Añadido
+
+- OCR para PDF escaneados y fotos (PNG, JPG), configurable con `INVOICEBOT_OCR_ENGINE`:
+  - `tesseract` (por defecto): OCR local con Tesseract.js, sin internet. Los datos de español e inglés vienen como dependencias y se copian a `data/ocr/`; nunca se descargan. Los PDF se dibujan página a página (`INVOICEBOT_OCR_MAX_PAGES`, `INVOICEBOT_OCR_SCALE`) y las imágenes torcidas se enderezan antes de leerlas. El texto pasa luego al proveedor de IA, que recibe aviso de que viene de un OCR.
+  - `claude`: la imagen o el PDF se envía a Claude, que lo lee con visión (límites de 5 MB por imagen y 30 MB por PDF). Queda registrado en `extraction_runs` como `anthropic-vision`.
+  - `none`: sin OCR, como hasta ahora.
+- Notas `OCR_SOURCE` (motor y confianza) y advertencia `OCR_LOW_CONFIDENCE` por debajo de `INVOICEBOT_OCR_MIN_CONFIDENCE` (70 % por defecto), para revisar esos datos contra la imagen.
+- Los documentos en `needs_ocr` se reprocesan solos al activar el OCR. Si el OCR no encuentra texto, el documento sigue en `needs_ocr` con la explicación.
+- `doctor` comprueba el motor de OCR elegido y `config` lo muestra.
+- Pruebas con comprobantes escaneados y fotografiados generados (nítidos, torcidos, con manchas y en blanco) leídos con Tesseract real.
+
+### Cambiado
+
+- Versión del prompt `invoice-extraction/2026-10-31.2`: indica cómo tratar errores típicos del OCR y documentos adjuntos.
+
 ## [0.2.0] - 2026-10-30
 
 ### Añadido

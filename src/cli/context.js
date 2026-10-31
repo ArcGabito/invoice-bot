@@ -6,6 +6,7 @@ import { DocumentRouter } from '../infrastructure/documents/document-router.js';
 import { createAiProvider } from '../infrastructure/ai/provider-factory.js';
 import { createLogger } from '../infrastructure/logging/logger.js';
 import { createSunatClient } from '../infrastructure/sunat/sunat-client.js';
+import { createOcrEngine, createVisionExtractor } from '../infrastructure/ocr/ocr-factory.js';
 
 /**
  * Raíz de composición: crea las dependencias reales a partir de la
@@ -29,6 +30,8 @@ export function createContext(globalOptions = {}) {
   let repository;
   let aiProvider;
   let sunatClient;
+  let documentRouter;
+  let visionExtractor;
 
   return {
     config,
@@ -51,11 +54,24 @@ export function createContext(globalOptions = {}) {
       sunatClient ??= createSunatClient(config);
       return sunatClient;
     },
-    documentRouter: new DocumentRouter({ minTextChars: config.minTextChars }),
+    get documentRouter() {
+      documentRouter ??= new DocumentRouter({
+        minTextChars: config.minTextChars,
+        ocrEngine: createOcrEngine(config),
+      });
+      return documentRouter;
+    },
+    /** Lectura con visión de Claude (solo con INVOICEBOT_OCR_ENGINE=claude). */
+    get visionExtractor() {
+      visionExtractor ??= createVisionExtractor(config);
+      return visionExtractor;
+    },
     get today() {
       return localIsoDate();
     },
-    close() {
+    /** Cierra la base de datos y el OCR: un worker de Tesseract abierto impediría terminar. */
+    async close() {
+      await documentRouter?.close();
       db?.close();
     },
   };

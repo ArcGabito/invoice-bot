@@ -4,11 +4,11 @@
 
 Automatización inteligente de facturas mediante extracción de texto, LLM y validación contable local.
 
-InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee comprobantes de pago peruanos —directamente del XML del comprobante electrónico cuando existe, o con un modelo de IA desde el PDF—, **comprueba con código determinista** que sean coherentes, detecta duplicados y guarda todo en una base de datos SQLite local, con trazabilidad de cada resultado.
+InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee comprobantes de pago peruanos —directamente del XML del comprobante electrónico cuando existe, o con un modelo de IA desde el PDF, la foto o el escaneo—, **comprueba con código determinista** que sean coherentes, detecta duplicados y guarda todo en una base de datos SQLite local, con trazabilidad de cada resultado.
 
 > El XML o el LLM proponen los datos; el código comprueba su consistencia; el usuario resuelve los casos dudosos.
 
-## Estado: v0.2.0
+## Estado: v0.3.0
 
 | Funcionalidad | Estado |
 | --- | --- |
@@ -27,7 +27,7 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 | Copias de seguridad verificadas con retención y logs diarios en archivo | ✅ |
 | Facturas con anticipos | ✅ |
 | Facturas de proveedores del extranjero (no domiciliados, tipo 91): AWS, Google, Cloudflare… | ✅ |
-| OCR para PDFs escaneados e imágenes | ⏳ próxima versión — hoy quedan en estado `needs_ocr` |
+| OCR de PDF escaneados y fotos: Tesseract local (sin internet) o visión de Claude, configurable | ✅ |
 | Revisión humana: pantalla web local y comandos para aprobar, rechazar y corregir, con auditoría | ✅ |
 
 ## Instalación
@@ -172,7 +172,7 @@ scan → descubrir archivos → SHA-256 → ¿ya procesado? → sí: omitir
         1.º XML UBL ─────→ leer datos (sin IA) ────────────┐   CDR → omitir
         2.º PDF → ¿hay un XML extraído con su mismo nombre? → sí: vincular (sin IA)
                                          ↓ no                  │
-            texto del PDF → ¿suficiente? → no: needs_ocr       │
+            texto del PDF → ¿suficiente? → no: OCR (Tesseract) │   sin texto legible → needs_ocr
                                          ↓ sí                  │
             LLM (JSON con esquema) ────────────────────────────┤
                                                                ↓
@@ -182,6 +182,7 @@ scan → descubrir archivos → SHA-256 → ¿ya procesado? → sí: omitir
 - **XML primero**: los comprobantes electrónicos traen un XML firmado (UBL 2.1) con los datos exactos. InvoiceBot lo lee sin IA —gratis y sin errores de interpretación— y reparte los importes según el catálogo de tributos de SUNAT (gravadas, exoneradas, inafectas, exportación, ISC, ICBPER). El PDF con el mismo nombre en la misma carpeta se vincula al XML y no se envía a la IA. La constancia de recepción (CDR, `R-*.xml`) se reconoce y se omite. La IA queda para lo que no tiene XML: facturas físicas, tickets y documentos del extranjero. La firma digital del XML todavía no se verifica.
 - **Proveedores del extranjero**: facturas de servicios digitales (AWS, Google, Microsoft, Cloudflare…) se registran como tipo 91 (comprobante de no domiciliado) con el identificador fiscal y el país del proveedor, sin exigir RUC, serie SUNAT ni IGV, y con una nota para revisar con el contador el IGV por utilización de servicios y la retención del impuesto a la renta. No se consultan en SUNAT. Probado con 13 facturas reales de Cloudflare: número, fecha, moneda, subtotal, total y emisor correctos en todas.
 - **La IA propone, el código decide**: si el modelo dice que un documento no es un comprobante pero extrajo tipo, número, emisor y total, se procesa igual con una advertencia para que una persona lo confirme (caso real: una boleta electrónica bien leída pero marcada como "no comprobante").
+- **OCR para escaneos y fotos**: un PDF sin texto, o una foto PNG/JPG, se lee con OCR antes de pasar a la IA. Ver [OCR](#ocr).
 - **Idempotencia**: cada archivo se identifica por su SHA-256. Ejecutar dos veces el mismo comando no duplica registros ni repite llamadas a la IA.
 - **Concurrencia limitada**: `INVOICEBOT_CONCURRENCY` documentos a la vez (2 por defecto).
 - **Reintentos controlados**: un JSON inválido se repite una vez en el momento; los errores de red se reintentan con `retry --failed`; un rechazo del modelo, un documento que no es comprobante o un PDF dañado no se reintentan salvo con `--force`.
@@ -244,13 +245,30 @@ Las incidencias de SUNAT se suman a las de validación y recalculan el estado de
 
 **Credenciales**: entra en SUNAT Operaciones en Línea con la Clave SOL de tu empresa → *Credenciales de API SUNAT*, registra una aplicación y copia su `client_id` y `client_secret` en `.env` (`INVOICEBOT_SUNAT_RUC`, `INVOICEBOT_SUNAT_CLIENT_ID`, `INVOICEBOT_SUNAT_CLIENT_SECRET`) junto con `INVOICEBOT_SUNAT_ENABLED=true`. Comprueba la conexión con `invoicebot doctor`. Referencia: [Manual de Consulta Integrada de Comprobante de Pago por Servicio Web](https://cpe.sunat.gob.pe/sites/default/files/inline-files/Manual-de-Consulta-Integrada-de-Comprobante-de-Pago-por-ServicioWEB_v2_0.pdf).
 
+### OCR
+
+Los PDF escaneados y las fotos no traen texto: hay que leerlo de la imagen. `INVOICEBOT_OCR_ENGINE` elige cómo:
+
+| Motor | Qué hace | Privacidad |
+| --- | --- | --- |
+| `tesseract` (por defecto) | OCR local con Tesseract (español e inglés incluidos en la instalación). Endereza imágenes torcidas y dibuja hasta `INVOICEBOT_OCR_MAX_PAGES` páginas de cada PDF. El texto leído pasa luego al proveedor de IA configurado. | Nada sale del equipo para el OCR. Con Ollama, todo el proceso es local. |
+| `claude` | Envía la imagen o el PDF a Claude, que lo lee con visión. Mejor con fotos difíciles (arrugas, sombras, letra a mano). Límite: 5 MB por imagen y 30 MB por PDF. | El documento completo sale del equipo hacia Anthropic. Requiere `ANTHROPIC_API_KEY`. |
+| `none` | Sin OCR: los escaneos quedan en `needs_ocr`. | — |
+
+- Cada factura leída por OCR lleva la nota `OCR_SOURCE` con el motor y la confianza. Si la confianza de Tesseract es menor que `INVOICEBOT_OCR_MIN_CONFIDENCE` (70 % por defecto), queda con la advertencia `OCR_LOW_CONFIDENCE` para que una persona compare los datos con la imagen en la pantalla de revisión.
+- Al activar el OCR, los documentos que habían quedado en `needs_ocr` se procesan en el siguiente `scan` o `run`, sin `--force`.
+- Para otros idiomas, instala sus datos (`npm install @tesseract.js-data/por`) y añádelos a `INVOICEBOT_OCR_LANGUAGES` (`spa,eng,por`).
+- `invoicebot doctor` comprueba que el motor elegido funciona.
+- Resultados de prueba: foto y PDF escaneado nítidos, 94 % de confianza y texto exacto en uno o dos segundos por página; foto torcida y con manchas, 57 % (marcada para revisión).
+
 ## Seguridad y privacidad
 
 - `.env`, `data/`, `exports/`, logs y archivos PDF/PNG/JPG están en `.gitignore`: no subas facturas reales.
 - Las claves de API se leen solo de variables de entorno y `invoicebot config` nunca las muestra.
 - Los logs van a stderr y no incluyen el texto de las facturas.
 - El contenido de cada documento se envía al modelo delimitado como datos, con instrucciones explícitas de ignorar cualquier orden que contenga.
-- Con `INVOICEBOT_AI_PROVIDER=ollama`, ningún documento sale del equipo.
+- Con `INVOICEBOT_AI_PROVIDER=ollama` y el OCR en `tesseract` (por defecto), ningún documento sale del equipo.
+- Con `INVOICEBOT_OCR_ENGINE=claude`, los escaneos y fotos se envían completos a Anthropic.
 - `verify-sunat` envía a SUNAT solo los identificadores de cada comprobante (RUC emisor, tipo, serie, número, fecha y total), nunca el documento.
 
 ## Desarrollo

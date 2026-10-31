@@ -1,6 +1,6 @@
 {
   "name": "invoicebot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Automatización local de facturas peruanas: extracción de texto, IA, validación contable y SQLite",
   "main": "src/cli/index.js",
   "scripts": {
@@ -31,6 +31,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.3.0",
+    "@napi-rs/canvas": "1.0.11",
+    "@tesseract.js-data/eng": "^1.0.0",
+    "@tesseract.js-data/spa": "^1.0.0",
     "better-sqlite3": "^13.0.3",
     "commander": "^15.0.0",
     "csv-stringify": "^6.9.0",
@@ -38,6 +41,7 @@
     "fast-xml-parser": "^5.11.2",
     "pdfjs-dist": "^6.4.299",
     "pino": "^10.4.0",
+    "tesseract.js": "^7.0.0",
     "write-excel-file": "^4.1.1",
     "zod": "^4.6.7"
   },

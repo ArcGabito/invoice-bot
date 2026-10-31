@@ -35,7 +35,7 @@ export class OllamaProvider {
     this.jsonSchema = z.toJSONSchema(ExtractionSchema);
   }
 
-  async extract({ text, fileName }) {
+  async extract({ text, fileName, ocr = false }) {
     const body = {
       model: this.model,
       stream: true,
@@ -44,7 +44,7 @@ export class OllamaProvider {
       options: { temperature: 0, num_ctx: this.numCtx },
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt({ text, fileName }) },
+        { role: 'user', content: buildUserPrompt({ text, fileName, ocr }) },
       ],
     };
 

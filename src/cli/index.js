@@ -53,7 +53,7 @@ export function buildProgram() {
     } catch (error) {
       process.exitCode = reportError(error, out);
     } finally {
-      ctx?.close();
+      await ctx?.close();
     }
   };
 

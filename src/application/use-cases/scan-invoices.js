@@ -65,6 +65,7 @@ export async function scanInvoices({
   onProgress = () => {},
 }) {
   const { repository, config, logger } = deps;
+  const ocrAvailable = Boolean(deps.documentRouter?.canOcr || deps.visionExtractor);
   const started = Date.now();
   const summary = emptySummary();
 
@@ -96,7 +97,7 @@ export async function scanInvoices({
     let document = repository.findDocumentBySha(hash.sha256);
     if (dryRun) {
       const enqueue = () => queue.push({ document, filePath, mimeType });
-      if (document) classifyExisting(document, filePath, summary, enqueue);
+      if (document) classifyExisting(document, filePath, summary, enqueue, ocrAvailable);
       else if (seenInDryRun.has(hash.sha256)) summary.exactDuplicates++;
       else {
         seenInDryRun.add(hash.sha256);
@@ -115,15 +116,21 @@ export async function scanInvoices({
       });
     }
     repository.recordOccurrence(document.id, filePath);
-    classifyExisting(document, filePath, summary, () => {
-      if (queuedIds.has(document.id)) return;
-      queuedIds.add(document.id);
-      queue.push({
-        document,
-        filePath: document.file_path === filePath ? filePath : document.file_path,
-        mimeType,
-      });
-    });
+    classifyExisting(
+      document,
+      filePath,
+      summary,
+      () => {
+        if (queuedIds.has(document.id)) return;
+        queuedIds.add(document.id);
+        queue.push({
+          document,
+          filePath: document.file_path === filePath ? filePath : document.file_path,
+          mimeType,
+        });
+      },
+      ocrAvailable,
+    );
   }
 
   summary.queued = queue.length;
@@ -177,7 +184,11 @@ function linkToXml(document, xmlDocument, repository) {
   return { outcome: 'skipped', reason: SKIP_REASON.PRINTED_REPRESENTATION };
 }
 
-function classifyExisting(document, filePath, summary, enqueue) {
+/**
+ * Clasifica un documento ya registrado. Con OCR disponible, los que quedaron
+ * "requiere OCR" en ejecuciones anteriores se vuelven a procesar.
+ */
+function classifyExisting(document, filePath, summary, enqueue, ocrAvailable = false) {
   const isCopy = document.file_path !== filePath;
   if (isCopy) summary.exactDuplicates++;
   switch (document.status) {
@@ -189,7 +200,8 @@ function classifyExisting(document, filePath, summary, enqueue) {
       if (!isCopy) summary.previouslyFailed++;
       break;
     case DOCUMENT_STATUS.NEEDS_OCR:
-      if (!isCopy) summary.needsOcr++;
+      if (ocrAvailable && !isCopy) enqueue?.();
+      else if (!isCopy) summary.needsOcr++;
       break;
     default:
       // pending o processing: un documento nuevo o una ejecución interrumpida.

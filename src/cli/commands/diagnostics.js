@@ -52,6 +52,15 @@ export function registerConfig(program, run) {
         out.line(`Concurrencia:         ${c.concurrency}`);
         out.line(`Intentos máximos:     ${c.maxAttempts}`);
         out.line(`Texto mínimo (OCR):   ${c.minTextChars} caracteres`);
+        out.line(
+          `OCR:                  ${
+            c.ocr.engine === 'none'
+              ? 'desactivado'
+              : c.ocr.engine === 'claude'
+                ? 'visión de Claude (el documento sale del equipo)'
+                : `Tesseract local · idiomas ${c.ocr.languages.join('+')} · confianza mínima ${c.ocr.minConfidence} %`
+          }`,
+        );
         out.line(`Tolerancia importes:  ${view.amountTolerance}`);
         out.line(`Nivel de logs:        ${c.logLevel}`);
         return EXIT_CODES.OK;
@@ -97,15 +106,25 @@ export function registerDoctor(program, run) {
           const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
           return `pdfjs-dist ${pdfjs.version}`;
         });
-        await check(
-          'OCR',
-          () => {
-            throw new Error(
-              'no disponible en esta versión (planificado); los documentos escaneados quedan en estado needs_ocr',
-            );
-          },
-          { optional: true },
-        );
+        const { engine } = ctx.config.ocr;
+        if (engine === 'none') {
+          await check(
+            'OCR',
+            () => {
+              throw new Error(
+                'desactivado (INVOICEBOT_OCR_ENGINE=none): los escaneos quedan en needs_ocr',
+              );
+            },
+            { optional: true },
+          );
+        } else if (engine === 'tesseract') {
+          await check('OCR (Tesseract, local)', () => ctx.documentRouter.ocrEngine.ping());
+        } else if (!options.offline) {
+          await check('OCR (visión de Claude)', async () => {
+            const detail = await ctx.visionExtractor.ping();
+            return `${detail}; los documentos sin texto se envían a Anthropic`;
+          });
+        }
         if (!options.offline) {
           await check(`Proveedor de IA (${ctx.config.aiProvider})`, () => ctx.aiProvider.ping());
         }
