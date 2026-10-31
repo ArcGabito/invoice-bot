@@ -16,6 +16,10 @@ const ConfigSchema = z.object({
   ollama: z.object({
     url: z.url(),
     model: z.string().min(1),
+    /** Razonamiento previo de los modelos que lo admiten: más lento y puede agotar el contexto. */
+    think: z.boolean({ error: 'usa true o false' }),
+    numCtx: z.int().min(2048).max(262_144),
+    timeoutMs: z.int().min(10_000).max(3_600_000),
   }),
   sunat: z
     .object({
@@ -94,7 +98,10 @@ export function loadConfig({
     },
     ollama: {
       url: env.INVOICEBOT_OLLAMA_URL || 'http://127.0.0.1:11434',
-      model: env.INVOICEBOT_OLLAMA_MODEL || 'qwen3:8b',
+      model: env.INVOICEBOT_OLLAMA_MODEL || 'qwen3.5:4b',
+      think: boolFrom(env.INVOICEBOT_OLLAMA_THINK, false),
+      numCtx: intFrom(env.INVOICEBOT_OLLAMA_NUM_CTX, 8192),
+      timeoutMs: intFrom(env.INVOICEBOT_OLLAMA_TIMEOUT_MS, 600_000),
     },
     sunat: {
       enabled: boolFrom(env.INVOICEBOT_SUNAT_ENABLED, false),

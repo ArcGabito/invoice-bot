@@ -12,7 +12,7 @@ export function createAiProvider(config) {
         effort: config.anthropic.effort,
       });
     case 'ollama':
-      return new OllamaProvider({ url: config.ollama.url, model: config.ollama.model });
+      return new OllamaProvider(config.ollama);
     case 'mock':
       return new MockProvider();
     default:

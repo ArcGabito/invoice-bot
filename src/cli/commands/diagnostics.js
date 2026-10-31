@@ -25,7 +25,9 @@ export function registerConfig(program, run) {
           out.line(`  ANTHROPIC_API_KEY:  ${view.anthropic.apiKey}`);
         }
         if (c.aiProvider === 'ollama')
-          out.line(`  Ollama:             ${c.ollama.url} · ${c.ollama.model}`);
+          out.line(
+            `  Ollama:             ${c.ollama.url} · ${c.ollama.model} · razonamiento ${c.ollama.think ? 'sí' : 'no'} · contexto ${c.ollama.numCtx}`,
+          );
         const s = c.sunat;
         if (!s.enabled) {
           out.line('Verificación SUNAT:   desactivada (INVOICEBOT_SUNAT_ENABLED=false)');

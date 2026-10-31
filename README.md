@@ -40,7 +40,7 @@ copy .env.example .env
 Edita `.env` y elige un proveedor de IA:
 
 - **Claude (Anthropic)** — `INVOICEBOT_AI_PROVIDER=anthropic` y `ANTHROPIC_API_KEY=...` (o inicia sesión con `ant auth login`). Usa salida estructurada validada con un esquema y el modelo `claude-opus-5-5` por defecto. Tiene activado el *fallback* del lado del servidor: si el modelo rechaza un documento, la API lo reintenta con otro modelo en la misma llamada.
-- **Ollama (local)** — `INVOICEBOT_AI_PROVIDER=ollama`. Los documentos no salen del equipo. Instala [Ollama](https://ollama.com/) y descarga un modelo (`ollama pull qwen3:8b`).
+- **Ollama (local)** — `INVOICEBOT_AI_PROVIDER=ollama`. Los documentos no salen del equipo. Instala [Ollama](https://ollama.com/) y descarga un modelo (`ollama pull qwen3.5:4b`). Probado con `qwen3.5:4b`: unos 10 s por factura y todos los campos correctos en los comprobantes de ejemplo. InvoiceBot desactiva por defecto el razonamiento del modelo (`INVOICEBOT_OLLAMA_THINK=false`), que lo hacía más de 30 veces más lento, y usa un contexto de 8192 tokens (`INVOICEBOT_OLLAMA_NUM_CTX`).
 - **Simulado** — `INVOICEBOT_AI_PROVIDER=mock`. Extracción por expresiones regulares, sin IA ni coste. Útil para probar el flujo.
 
 Comprueba la instalación:
