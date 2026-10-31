@@ -5,7 +5,7 @@ const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (c) => `&#${c.char
  * inserta con textContent (nunca como HTML) y el script y los estilos llevan
  * el nonce de la política de seguridad de contenido.
  */
-export function renderReviewPage({ token, nonce, reviewer }) {
+export function renderReviewPage({ token, nonce, reviewer, logout = false }) {
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -75,6 +75,7 @@ export function renderReviewPage({ token, nonce, reviewer }) {
     <button type="button" data-view="rejected" aria-pressed="false">Rechazadas <span data-count="rejected"></span></button>
   </nav>
   <span class="who">Revisando como <strong>${escapeHtml(reviewer)}</strong></span>
+  ${logout ? '<button type="button" class="btn" id="logout">Cerrar sesión</button>' : ''}
 </header>
 <main>
   <section id="list" aria-label="Facturas"></section>
@@ -129,10 +130,16 @@ export function renderReviewPage({ token, nonce, reviewer }) {
       headers: { 'x-invoicebot-token': TOKEN, ...(body ? { 'content-type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
+    // Sesión caducada o cerrada desde otro lugar: vuelve a la pantalla de acceso.
+    if (res.status === 401 && ${logout}) { location.reload(); return new Promise(() => {}); }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Error ' + res.status);
     return data;
   }
+  document.getElementById('logout')?.addEventListener('click', async () => {
+    await fetch('/logout', { method: 'POST', headers: { 'x-invoicebot-token': TOKEN } }).catch(() => {});
+    location.reload();
+  });
 
   async function loadQueue() {
     const data = await api('/api/queue?view=' + state.view);
@@ -282,6 +289,66 @@ export function renderReviewPage({ token, nonce, reviewer }) {
       if (state.items[0]) await select(state.items[0].invoice_id);
     } catch (e) { toast(e.message, true); }
   })();
+})();
+</script>
+</body>
+</html>`;
+}
+
+/** Pantalla de acceso de la revisión en red. Envía JSON con fetch (sin formularios). */
+export function renderLoginPage({ nonce }) {
+  return `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InvoiceBot · Acceso</title>
+<style nonce="${nonce}">
+  :root { --bg:#f6f7f9; --panel:#fff; --text:#1d2330; --muted:#667085; --line:#e4e7ec; --accent:#2457d6; --err:#b42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111418; --panel:#1a1f26; --text:#e6e9ee; --muted:#98a2b3; --line:#2b323c; --accent:#7aa2ff; --err:#ff8a7a; } }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; padding:16px; font: 14px/1.45 system-ui, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
+  form { width:100%; max-width:340px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:24px; display:flex; flex-direction:column; gap:12px; }
+  h1 { font-size:17px; margin:0 0 4px; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+  input { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+  button { font:inherit; border:0; border-radius:6px; padding:9px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:default; }
+  #error { color:var(--err); min-height:1.4em; margin:0; }
+</style>
+</head>
+<body>
+<form id="login" novalidate>
+  <h1>InvoiceBot · Revisión</h1>
+  <label>Usuario <input name="username" autocomplete="username" autocapitalize="none" required autofocus></label>
+  <label>Contraseña <input name="password" type="password" autocomplete="current-password" required></label>
+  <button type="submit">Entrar</button>
+  <p id="error" role="alert"></p>
+</form>
+<script nonce="${nonce}">
+(() => {
+  const form = document.getElementById('login');
+  const error = document.getElementById('error');
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('button');
+    button.disabled = true;
+    error.textContent = '';
+    try {
+      const res = await fetch('/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: form.username.value, password: form.password.value }),
+      });
+      if (res.ok) return location.reload();
+      const data = await res.json().catch(() => ({}));
+      error.textContent = data.error || 'No se pudo entrar';
+      form.password.value = '';
+    } catch {
+      error.textContent = 'Sin conexión con el servidor';
+    }
+    button.disabled = false;
+  });
 })();
 </script>
 </body>

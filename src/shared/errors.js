@@ -49,6 +49,13 @@ export class ReviewError extends InvoiceBotError {
   }
 }
 
+/** Alta o cambio de usuario no válido (nombre repetido, contraseña corta…). Código de salida 2. */
+export class UserError extends InvoiceBotError {
+  constructor(message, options = {}) {
+    super(message, { code: 'USER_ERROR', exitCode: EXIT_CODES.USAGE_ERROR, ...options });
+  }
+}
+
 export class DocumentReadError extends InvoiceBotError {
   constructor(message, { cause } = {}) {
     super(message, { code: 'DOCUMENT_READ_ERROR', cause });

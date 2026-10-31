@@ -13,6 +13,7 @@ import { registerRun } from './commands/run.js';
 import { registerBackup } from './commands/backup.js';
 import { registerReviewActions } from './commands/review-actions.js';
 import { registerServe } from './commands/serve.js';
+import { registerUsers } from './commands/users.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 
@@ -69,6 +70,7 @@ export function buildProgram() {
   registerBackup(program, run);
   registerReviewActions(program, run);
   registerServe(program, run);
+  registerUsers(program, run);
   registerConfig(program, run);
   return program;
 }

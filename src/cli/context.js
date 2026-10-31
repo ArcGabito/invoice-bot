@@ -2,6 +2,7 @@ import os from 'node:os';
 import { loadConfig } from '../shared/config.js';
 import { openDatabase } from '../infrastructure/database/connection.js';
 import { SqliteInvoiceRepository } from '../infrastructure/database/repositories/sqlite-invoice-repository.js';
+import { SqliteUserRepository } from '../infrastructure/database/repositories/sqlite-user-repository.js';
 import { DocumentRouter } from '../infrastructure/documents/document-router.js';
 import { createAiProvider } from '../infrastructure/ai/provider-factory.js';
 import { createLogger } from '../infrastructure/logging/logger.js';
@@ -28,6 +29,7 @@ export function createContext(globalOptions = {}) {
   });
   let db;
   let repository;
+  let users;
   let aiProvider;
   let sunatClient;
   let documentRouter;
@@ -45,6 +47,11 @@ export function createContext(globalOptions = {}) {
     get repository() {
       repository ??= new SqliteInvoiceRepository(this.db);
       return repository;
+    },
+    /** Usuarios de la pantalla de revisión en red. */
+    get users() {
+      users ??= new SqliteUserRepository(this.db);
+      return users;
     },
     get aiProvider() {
       aiProvider ??= createAiProvider(config);

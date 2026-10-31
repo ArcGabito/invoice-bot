@@ -2,6 +2,29 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
 
+## [0.4.0] - 2026-10-31
+
+### Añadido
+
+- Instalación en una máquina virtual o un servidor, con guía para TI en `docs/instalacion-vm.md`.
+- Pantalla de revisión en red (`INVOICEBOT_SERVE_HOST=0.0.0.0` o `serve --host`):
+  - cada persona entra con su usuario y contraseña, y su usuario firma las revisiones en `review_actions`;
+  - HTTPS con un `.pfx` (`INVOICEBOT_SERVE_TLS_PFX`) o un par PEM (`INVOICEBOT_SERVE_TLS_CERT` y `_KEY`). No arranca en red sin usuarios ni sin HTTPS, salvo detrás de un proxy declarado con `INVOICEBOT_SERVE_ALLOW_HTTP=true`;
+  - sesión en cookie `HttpOnly`, `SameSite=Strict` y `Secure` (`__Host-`), con token antifalsificación en cada llamada y HSTS. Dura `INVOICEBOT_SERVE_SESSION_HOURS` (10 h por defecto) y se invalida al cerrar sesión, al cambiar la contraseña o al desactivar al usuario;
+  - bloqueo de 15 minutos tras 5 intentos fallidos por usuario y por IP. Los accesos y los rechazos quedan en el log.
+- Comando `user` (`add`, `list`, `reset-password`, `disable`, `enable`):
+  - contraseñas con scrypt, de al menos 12 caracteres, generadas al azar si no se indican con `--password-stdin`;
+  - tabla `users` (migración 007).
+- `scripts/windows/register-scheduled-task.ps1`:
+  - `-ServiceAccount` registra las tareas con una cuenta de servicio (gMSA o cuenta normal), para que corran sin sesión iniciada;
+  - `-Serve` añade la pantalla de revisión, que arranca con Windows y se reinicia si se cae.
+- `scripts/windows/new-review-certificate.ps1`: crea un certificado HTTPS autofirmado (`.pfx` y `.cer` para los PC de quienes revisan).
+- `doctor` comprueba los usuarios y el certificado de la pantalla en red; `config` muestra su modo.
+
+### Cambiado
+
+- Ollama queda documentado como proveedor para desarrollo; en producción se usa Claude.
+
 ## [0.3.0] - 2026-10-31
 
 ### Añadido

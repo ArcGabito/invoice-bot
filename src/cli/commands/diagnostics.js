@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import { EXIT_CODES } from '../../shared/errors.js';
+import { isLoopback } from '../../web/review-server.js';
+import { prepareNetworkServe } from './serve.js';
 
 export function registerConfig(program, run) {
   program
@@ -61,6 +63,21 @@ export function registerConfig(program, run) {
                 : `Tesseract local · idiomas ${c.ocr.languages.join('+')} · confianza mínima ${c.ocr.minConfidence} %`
           }`,
         );
+        const sv = c.serve;
+        if (isLoopback(sv.host)) {
+          out.line(`Pantalla de revisión: solo este equipo · puerto ${sv.port}`);
+        } else {
+          const tlsMode = sv.tls.pfxFile
+            ? `HTTPS (${sv.tls.pfxFile})`
+            : sv.tls.certFile
+              ? `HTTPS (${sv.tls.certFile})`
+              : sv.allowHttp
+                ? 'HTTP sin cifrar (proxy HTTPS delante)'
+                : 'falta el certificado HTTPS';
+          out.line(
+            `Pantalla de revisión: en red (${sv.host}:${sv.port}) · ${tlsMode} · sesiones de ${sv.sessionHours} h`,
+          );
+        }
         out.line(`Tolerancia importes:  ${view.amountTolerance}`);
         out.line(`Nivel de logs:        ${c.logLevel}`);
         return EXIT_CODES.OK;
@@ -123,6 +140,13 @@ export function registerDoctor(program, run) {
           await check('OCR (visión de Claude)', async () => {
             const detail = await ctx.visionExtractor.ping();
             return `${detail}; los documentos sin texto se envían a Anthropic`;
+          });
+        }
+        if (!isLoopback(ctx.config.serve.host)) {
+          await check('Pantalla de revisión en red', () => {
+            const { tls } = prepareNetworkServe(ctx);
+            const n = ctx.users.countActive();
+            return `${n} usuario(s) activo(s), ${tls ? 'certificado HTTPS válido' : 'HTTP detrás de un proxy'}`;
           });
         }
         if (!options.offline) {

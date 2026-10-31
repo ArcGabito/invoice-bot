@@ -81,8 +81,36 @@ const ConfigSchema = z.object({
     /** Por debajo de esta confianza (0-100) la factura queda con advertencia para revisión. */
     minConfidence: z.int().min(0).max(100),
   }),
-  /** Pantalla de revisión local (`invoicebot serve`); solo escucha en 127.0.0.1. */
-  serve: z.object({ port: z.int().min(1024).max(65535) }),
+  /**
+   * Pantalla de revisión (`invoicebot serve`). Con host 127.0.0.1 solo se
+   * usa desde este equipo; con otra dirección (p. ej. 0.0.0.0 en una VM) se
+   * abre a la red y exige usuarios (`invoicebot user add`) y HTTPS.
+   */
+  serve: z
+    .object({
+      port: z.int().min(1024).max(65535),
+      host: z.string().min(1),
+      sessionHours: z
+        .int()
+        .min(1)
+        .max(24 * 7),
+      /** HTTP sin cifrar en red: solo detrás de un proxy HTTPS de la empresa. */
+      allowHttp: z.boolean({ error: 'usa true o false' }),
+      tls: z.object({
+        certFile: z.string().min(1).nullable(),
+        keyFile: z.string().min(1).nullable(),
+        pfxFile: z.string().min(1).nullable(),
+        passphraseSet: z.boolean(),
+      }),
+    })
+    .refine((s) => Boolean(s.tls.certFile) === Boolean(s.tls.keyFile), {
+      message: 'INVOICEBOT_SERVE_TLS_CERT e INVOICEBOT_SERVE_TLS_KEY van juntos',
+      path: ['tls'],
+    })
+    .refine((s) => !(s.tls.pfxFile && s.tls.certFile), {
+      message: 'usa INVOICEBOT_SERVE_TLS_PFX o el par CERT/KEY, no ambos',
+      path: ['tls'],
+    }),
   /** Ejecución desatendida (`invoicebot run`). */
   run: z.object({
     /** Carpeta de entrada; puede ser una carpeta de OneDrive o SharePoint sincronizada. */
@@ -128,6 +156,7 @@ export function loadConfig({
   }
 
   const dataDir = path.resolve(cwd, overrides.dataDir ?? env.INVOICEBOT_DATA_DIR ?? './data');
+  const fileFrom = (value) => (value ? path.resolve(cwd, value) : null);
   const tolerance = env.INVOICEBOT_AMOUNT_TOLERANCE ?? '0.02';
   const toleranceCents = Math.round(Number(tolerance) * 100);
 
@@ -182,7 +211,18 @@ export function loadConfig({
       scale: env.INVOICEBOT_OCR_SCALE ? Number(env.INVOICEBOT_OCR_SCALE) : 3,
       minConfidence: intFrom(env.INVOICEBOT_OCR_MIN_CONFIDENCE, 70),
     },
-    serve: { port: intFrom(env.INVOICEBOT_SERVE_PORT, 4317) },
+    serve: {
+      port: intFrom(env.INVOICEBOT_SERVE_PORT, 4317),
+      host: env.INVOICEBOT_SERVE_HOST || '127.0.0.1',
+      sessionHours: intFrom(env.INVOICEBOT_SERVE_SESSION_HOURS, 10),
+      allowHttp: boolFrom(env.INVOICEBOT_SERVE_ALLOW_HTTP, false),
+      tls: {
+        certFile: fileFrom(env.INVOICEBOT_SERVE_TLS_CERT),
+        keyFile: fileFrom(env.INVOICEBOT_SERVE_TLS_KEY),
+        pfxFile: fileFrom(env.INVOICEBOT_SERVE_TLS_PFX),
+        passphraseSet: Boolean(env.INVOICEBOT_SERVE_TLS_PASSPHRASE),
+      },
+    },
     run: {
       inboxDir: env.INVOICEBOT_INBOX_DIR ? path.resolve(cwd, env.INVOICEBOT_INBOX_DIR) : null,
       recursive: boolFrom(env.INVOICEBOT_INBOX_RECURSIVE, true),

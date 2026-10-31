@@ -1,13 +1,23 @@
 <#
 .SYNOPSIS
-  Registra (o elimina) una tarea programada de Windows que ejecuta InvoiceBot
-  de forma desatendida: `invoicebot run --trigger scheduled` cada N minutos.
+  Registra (o elimina) las tareas programadas de Windows de InvoiceBot:
+  `invoicebot run --trigger scheduled` cada N minutos y, con -Serve, la
+  pantalla de revisión (`invoicebot serve`) siempre encendida.
 
 .DESCRIPTION
-  La tarea se crea con el usuario actual y corre mientras su sesión está
-  iniciada. Para que corra con la sesión cerrada (servidor o VM dedicada),
-  regístrala desde el Programador de tareas con "Ejecutar tanto si el usuario
-  inició sesión como si no", o pide a TI una cuenta de servicio.
+  Sin -ServiceAccount, las tareas usan el usuario actual y solo corren
+  mientras su sesión está iniciada: sirve para probar en un PC.
+
+  En una VM o un servidor usa -ServiceAccount: las tareas corren aunque nadie
+  haya iniciado sesión y sobreviven a los reinicios.
+  - Cuenta normal (DOMINIO\svc-invoicebot o .\svc-invoicebot): el script pide
+    su contraseña una vez; Windows la guarda cifrada.
+  - Cuenta de servicio administrada de grupo (gMSA, termina en $): no pide
+    contraseña. Es la opción recomendada en un dominio.
+  La cuenta necesita permiso de lectura y escritura en la carpeta del proyecto
+  (data, logs, exports) y en la carpeta de entrada, y el derecho "Iniciar
+  sesión como proceso por lotes". Registrar con otra cuenta requiere abrir
+  PowerShell como administrador.
 
   Si un ciclo sigue en curso cuando toca el siguiente, Windows no lanza otro
   (MultipleInstances IgnoreNew) e InvoiceBot además lo impide con su candado.
@@ -16,7 +26,10 @@
   .\scripts\windows\register-scheduled-task.ps1 -IntervalMinutes 15
 
 .EXAMPLE
-  .\scripts\windows\register-scheduled-task.ps1 -IntervalMinutes 15 -WhatIf
+  .\scripts\windows\register-scheduled-task.ps1 -ServiceAccount 'EMPRESA\svc-invoicebot' -Serve
+
+.EXAMPLE
+  .\scripts\windows\register-scheduled-task.ps1 -ServiceAccount 'EMPRESA\gmsa-invoicebot$' -Serve -WhatIf
 
 .EXAMPLE
   .\scripts\windows\register-scheduled-task.ps1 -Unregister
@@ -28,19 +41,27 @@ param(
   [int]$IntervalMinutes = 15,
   [string]$ProjectDir = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
   [string]$NodePath = (Get-Command node -ErrorAction SilentlyContinue).Source,
+  # Cuenta con la que corren las tareas sin sesión iniciada (VM o servidor).
+  [string]$ServiceAccount,
+  # Registra además la pantalla de revisión, que arranca con Windows.
+  [switch]$Serve,
   [switch]$Unregister
 )
 
 $ErrorActionPreference = 'Stop'
+$serveTaskName = "$TaskName-Revision"
 
 if ($Unregister) {
-  if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    if ($PSCmdlet.ShouldProcess($TaskName, 'Eliminar la tarea programada')) {
-      Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-      Write-Host "Tarea '$TaskName' eliminada."
+  foreach ($name in @($TaskName, $serveTaskName)) {
+    if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+      if ($PSCmdlet.ShouldProcess($name, 'Eliminar la tarea programada')) {
+        Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $name -Confirm:$false
+        Write-Host "Tarea '$name' eliminada."
+      }
+    } else {
+      Write-Host "No existe la tarea '$name'."
     }
-  } else {
-    Write-Host "No existe la tarea '$TaskName'."
   }
   return
 }
@@ -53,35 +74,75 @@ if (-not (Test-Path $cli)) {
   throw "No se encontró $cli. Indica la carpeta del proyecto con -ProjectDir."
 }
 $envFile = Join-Path $ProjectDir '.env'
-if (-not (Test-Path $envFile) -or -not (Select-String -Path $envFile -Pattern '^INVOICEBOT_INBOX_DIR=.+' -Quiet)) {
+function Test-EnvSetting([string]$Name) {
+  (Test-Path $envFile) -and (Select-String -Path $envFile -Pattern "^$Name=.+" -Quiet)
+}
+if (-not (Test-EnvSetting 'INVOICEBOT_INBOX_DIR')) {
   Write-Warning 'Define INVOICEBOT_INBOX_DIR en .env antes de que corra la tarea; sin carpeta de entrada cada ciclo terminará con error.'
 }
-
-$action = New-ScheduledTaskAction `
-  -Execute $NodePath `
-  -Argument "`"$cli`" run --trigger scheduled" `
-  -WorkingDirectory $ProjectDir
-$trigger = New-ScheduledTaskTrigger `
-  -Once -At (Get-Date).AddMinutes(1) `
-  -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
-$settings = New-ScheduledTaskSettingsSet `
-  -MultipleInstances IgnoreNew `
-  -StartWhenAvailable `
-  -AllowStartIfOnBatteries `
-  -DontStopIfGoingOnBatteries `
-  -ExecutionTimeLimit (New-TimeSpan -Hours 2)
-$description = "InvoiceBot: procesa los comprobantes de la carpeta de entrada cada $IntervalMinutes minutos. Proyecto: $ProjectDir"
-
-if ($PSCmdlet.ShouldProcess($TaskName, "Registrar la tarea programada cada $IntervalMinutes minutos")) {
-  Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Description $description `
-    -Force | Out-Null
-  Write-Host "Tarea '$TaskName' registrada: cada $IntervalMinutes minutos con el usuario actual."
-  Write-Host "Probarla ahora:  Start-ScheduledTask -TaskName '$TaskName'"
-  Write-Host "Ver resultados:  node `"$cli`" status"
-  Write-Host "Eliminarla:      .\scripts\windows\register-scheduled-task.ps1 -Unregister"
+if ($Serve -and -not (Test-EnvSetting 'INVOICEBOT_SERVE_HOST')) {
+  Write-Warning 'Sin INVOICEBOT_SERVE_HOST=0.0.0.0 en .env, la pantalla de revisión solo se podrá usar desde esta máquina.'
 }
+
+# Con quién corren las tareas.
+$registerArgs = @{}
+$who = 'el usuario actual (solo con su sesión iniciada)'
+if ($ServiceAccount) {
+  if ($ServiceAccount.EndsWith('$')) {
+    $registerArgs.Principal = New-ScheduledTaskPrincipal -UserId $ServiceAccount -LogonType Password -RunLevel Limited
+    $who = "la cuenta administrada $ServiceAccount (sin sesión iniciada)"
+  } else {
+    $credential = Get-Credential -UserName $ServiceAccount -Message "Contraseña de $ServiceAccount (Windows la guarda cifrada para las tareas)"
+    $registerArgs.User = $credential.UserName
+    $registerArgs.Password = $credential.GetNetworkCredential().Password
+    $who = "$ServiceAccount (sin sesión iniciada)"
+  }
+}
+
+function Register-InvoiceBotTask($Name, $Arguments, $Trigger, $Settings, $Description) {
+  $action = New-ScheduledTaskAction -Execute $NodePath -Argument "`"$cli`" $Arguments" -WorkingDirectory $ProjectDir
+  Register-ScheduledTask `
+    -TaskName $Name `
+    -Action $action `
+    -Trigger $Trigger `
+    -Settings $Settings `
+    -Description $Description `
+    -Force @registerArgs | Out-Null
+}
+
+if ($PSCmdlet.ShouldProcess($TaskName, "Registrar el ciclo del bot cada $IntervalMinutes minutos con $who")) {
+  $trigger = New-ScheduledTaskTrigger `
+    -Once -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
+  $settings = New-ScheduledTaskSettingsSet `
+    -MultipleInstances IgnoreNew `
+    -StartWhenAvailable `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+  Register-InvoiceBotTask $TaskName 'run --trigger scheduled' $trigger $settings `
+    "InvoiceBot: procesa los comprobantes de la carpeta de entrada cada $IntervalMinutes minutos. Proyecto: $ProjectDir"
+  Write-Host "Tarea '$TaskName' registrada: cada $IntervalMinutes minutos con $who."
+}
+
+if ($Serve -and $PSCmdlet.ShouldProcess($serveTaskName, "Registrar la pantalla de revisión al arrancar Windows con $who")) {
+  # Arranca con Windows, sin límite de tiempo, y se reinicia si se cae.
+  $trigger = New-ScheduledTaskTrigger -AtStartup
+  $settings = New-ScheduledTaskSettingsSet `
+    -MultipleInstances IgnoreNew `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -RestartCount 999 `
+    -RestartInterval (New-TimeSpan -Minutes 1)
+  Register-InvoiceBotTask $serveTaskName 'serve' $trigger $settings `
+    "InvoiceBot: pantalla de revisión (invoicebot serve). Proyecto: $ProjectDir"
+  Start-ScheduledTask -TaskName $serveTaskName
+  Write-Host "Tarea '$serveTaskName' registrada e iniciada: arranca con Windows con $who."
+}
+
+Write-Host ''
+Write-Host "Probar el ciclo ahora:  Start-ScheduledTask -TaskName '$TaskName'"
+Write-Host "Ver resultados:         node `"$cli`" status"
+Write-Host "Comprobar todo:         node `"$cli`" doctor"
+Write-Host 'Eliminar las tareas:    .\scripts\windows\register-scheduled-task.ps1 -Unregister'

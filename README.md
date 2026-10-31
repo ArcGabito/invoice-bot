@@ -8,7 +8,7 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 
 > El XML o el LLM proponen los datos; el código comprueba su consistencia; el usuario resuelve los casos dudosos.
 
-## Estado: v0.3.0
+## Estado: v0.4.0
 
 | Funcionalidad | Estado |
 | --- | --- |
@@ -28,7 +28,8 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 | Facturas con anticipos | ✅ |
 | Facturas de proveedores del extranjero (no domiciliados, tipo 91): AWS, Google, Cloudflare… | ✅ |
 | OCR de PDF escaneados y fotos: Tesseract local (sin internet) o visión de Claude, configurable | ✅ |
-| Revisión humana: pantalla web local y comandos para aprobar, rechazar y corregir, con auditoría | ✅ |
+| Revisión humana: pantalla web y comandos para aprobar, rechazar y corregir, con auditoría | ✅ |
+| Instalación en una VM: pantalla de revisión en red con usuarios y HTTPS, tareas con cuenta de servicio | ✅ |
 
 ## Instalación
 
@@ -44,7 +45,7 @@ copy .env.example .env
 Edita `.env` y elige un proveedor de IA:
 
 - **Claude (Anthropic)** — `INVOICEBOT_AI_PROVIDER=anthropic` y `ANTHROPIC_API_KEY=...` (o inicia sesión con `ant auth login`). Usa salida estructurada validada con un esquema y el modelo `claude-opus-5-5` por defecto. Tiene activado el *fallback* del lado del servidor: si el modelo rechaza un documento, la API lo reintenta con otro modelo en la misma llamada.
-- **Ollama (local)** — `INVOICEBOT_AI_PROVIDER=ollama`. Los documentos no salen del equipo. Instala [Ollama](https://ollama.com/) y descarga un modelo (`ollama pull qwen3.5:4b`). Probado con `qwen3.5:4b`: unos 10 s por factura y todos los campos correctos en los comprobantes de ejemplo. InvoiceBot desactiva por defecto el razonamiento del modelo (`INVOICEBOT_OLLAMA_THINK=false`), que lo hacía más de 30 veces más lento, y usa un contexto de 8192 tokens (`INVOICEBOT_OLLAMA_NUM_CTX`).
+- **Ollama (local, para desarrollo)** — `INVOICEBOT_AI_PROVIDER=ollama`. Los documentos no salen del equipo; en producción se usa Claude. Instala [Ollama](https://ollama.com/) y descarga un modelo (`ollama pull qwen3.5:4b`). Probado con `qwen3.5:4b`: unos 10 s por factura y todos los campos correctos en los comprobantes de ejemplo. InvoiceBot desactiva por defecto el razonamiento del modelo (`INVOICEBOT_OLLAMA_THINK=false`), que lo hacía más de 30 veces más lento, y usa un contexto de 8192 tokens (`INVOICEBOT_OLLAMA_NUM_CTX`).
 - **Simulado** — `INVOICEBOT_AI_PROVIDER=mock`. Extracción por expresiones regulares, sin IA ni coste. Útil para probar el flujo.
 
 Comprueba la instalación:
@@ -95,6 +96,7 @@ Base de datos: C:\...\invoice-bot\data\invoicebot.db
 | `invoicebot run --watch` | Repite el ciclo cada `INVOICEBOT_RUN_INTERVAL_MINUTES` hasta detenerlo. |
 | `invoicebot backup` | Copia verificada de la base de datos (`--list` para ver las existentes). |
 | `invoicebot serve --open` | Abre la **pantalla de revisión** en el navegador. |
+| `invoicebot user add <usuario> --name "Nombre"` | Usuario de la pantalla de revisión en red (`list`, `reset-password`, `disable`, `enable`). |
 | `invoicebot show <factura>` | Datos, incidencias e historial de una factura. |
 | `invoicebot approve <factura>` | Aprueba: confirma los datos y resuelve las advertencias (`--force -n "motivo"` si tiene errores). |
 | `invoicebot correct <factura> campo=valor…` | Corrige datos y revalida (`total=118.00 issue_date=15/10/2026`). |
@@ -133,7 +135,15 @@ invoicebot serve --open
 - Cada acción queda en la tabla `review_actions` con quién la hizo, cuándo y el valor anterior y nuevo; `invoicebot show <factura>` y la pantalla muestran ese historial. Quién revisa es el usuario de Windows, o `--user` / `INVOICEBOT_USER`.
 - Las exportaciones incluyen la columna `review_status` (pendiente, aprobada).
 
-La pantalla escucha solo en `127.0.0.1` (no es accesible desde la red), comprueba la cabecera `Host` y exige un token aleatorio por sesión en cada llamada, con una política de seguridad de contenido estricta. Puerto: `INVOICEBOT_SERVE_PORT` (4317).
+Por defecto la pantalla escucha solo en `127.0.0.1` (no es accesible desde la red), comprueba la cabecera `Host` y exige un token aleatorio por sesión en cada llamada, con una política de seguridad de contenido estricta. Puerto: `INVOICEBOT_SERVE_PORT` (4317).
+
+**En red** (`INVOICEBOT_SERVE_HOST=0.0.0.0`, por ejemplo en una VM), cada persona entra con su usuario y contraseña desde su navegador, y su usuario es el que firma las revisiones:
+
+- No arranca sin al menos un usuario (`invoicebot user add`) ni sin HTTPS (`INVOICEBOT_SERVE_TLS_PFX`, o `INVOICEBOT_SERVE_TLS_CERT` y `_KEY`). La única excepción es un proxy HTTPS de la empresa delante, declarado con `INVOICEBOT_SERVE_ALLOW_HTTP=true`.
+- Contraseñas con scrypt (mínimo 12 caracteres, generadas al azar si no se indican); bloqueo de 15 minutos tras 5 intentos fallidos.
+- Sesión en cookie `HttpOnly`, `SameSite=Strict` y `Secure`, con token antifalsificación en cada acción. Caduca a las `INVOICEBOT_SERVE_SESSION_HOURS` (10) y se invalida al desactivar al usuario o cambiarle la contraseña.
+
+La guía completa para TI está en [docs/instalacion-vm.md](docs/instalacion-vm.md).
 
 ### Ejecución desatendida (RPA)
 
@@ -154,6 +164,12 @@ powershell -ExecutionPolicy Bypass -File scripts/windows/register-scheduled-task
 ```
 
 Si prefieres un proceso que quede corriendo, usa `invoicebot run --watch`.
+
+En una VM o un servidor, registra las tareas con una cuenta de servicio para que corran sin sesión iniciada, y añade la pantalla de revisión, que arranca con Windows (ver [docs/instalacion-vm.md](docs/instalacion-vm.md)):
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/windows/register-scheduled-task.ps1 -ServiceAccount 'EMPRESA\gmsa-invoicebot$' -Serve
+```
 
 ### Códigos de salida
 
@@ -269,6 +285,7 @@ Los PDF escaneados y las fotos no traen texto: hay que leerlo de la imagen. `INV
 - El contenido de cada documento se envía al modelo delimitado como datos, con instrucciones explícitas de ignorar cualquier orden que contenga.
 - Con `INVOICEBOT_AI_PROVIDER=ollama` y el OCR en `tesseract` (por defecto), ningún documento sale del equipo.
 - Con `INVOICEBOT_OCR_ENGINE=claude`, los escaneos y fotos se envían completos a Anthropic.
+- La pantalla de revisión solo se abre a la red con usuarios y HTTPS; las contraseñas se guardan con scrypt y nunca en claro.
 - `verify-sunat` envía a SUNAT solo los identificadores de cada comprobante (RUC emisor, tipo, serie, número, fecha y total), nunca el documento.
 
 ## Desarrollo
