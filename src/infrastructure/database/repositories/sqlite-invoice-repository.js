@@ -353,7 +353,8 @@ export class SqliteInvoiceRepository {
   /**
    * Facturas para exportar. Por defecto excluye las repeticiones de una misma
    * clave de negocio: conserva la leída de un XML si existe (datos exactos)
-   * y, si no, la primera registrada.
+   * y, si no, la del primer documento registrado (no la primera en terminar
+   * de procesarse, que depende de la concurrencia).
    */
   listInvoicesForExport({
     month = null,
@@ -383,7 +384,7 @@ export class SqliteInvoiceRepository {
     if (!includeDuplicates) {
       where.push(
         `(i.business_key IS NULL OR i.id = (SELECT i2.id FROM invoices i2 WHERE i2.business_key = i.business_key
-           ORDER BY CASE i2.data_source WHEN 'xml' THEN 0 ELSE 1 END, i2.id LIMIT 1))`,
+           ORDER BY CASE i2.data_source WHEN 'xml' THEN 0 ELSE 1 END, i2.document_id LIMIT 1))`,
       );
     }
     const sql = `SELECT i.*, d.file_name, d.file_path, d.sha256,

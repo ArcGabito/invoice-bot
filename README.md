@@ -152,7 +152,7 @@ El IGV no se calcula sobre todo el subtotal cuando hay operaciones exoneradas o 
 
 ### Verificación en SUNAT
 
-`invoicebot verify-sunat` usa el servicio oficial de SUNAT **Consulta Integrada de Comprobante de Pago** para confirmar cada comprobante registrado. Una sola consulta devuelve:
+Es **opcional y está desactivada por defecto**: InvoiceBot no contacta a SUNAT hasta que lo actives en la configuración. Cuando está activa, usa el servicio oficial de SUNAT **Consulta Integrada de Comprobante de Pago** para confirmar cada comprobante registrado. Una sola consulta devuelve:
 
 | Dato | Resultado en InvoiceBot |
 | --- | --- |
@@ -167,11 +167,23 @@ El IGV no se calcula sobre todo el subtotal cuando hay operaciones exoneradas o 
 invoicebot verify-sunat                    # comprobantes sin verificar y los aún no informados
 invoicebot verify-sunat --month 2026-10
 invoicebot verify-sunat --force --limit 50 # vuelve a consultar también los ya verificados
+invoicebot scan ./facturas --verify-sunat  # escanea y verifica al terminar
 ```
+
+| Variable | Valor por defecto | Uso |
+| --- | --- | --- |
+| `INVOICEBOT_SUNAT_ENABLED` | `false` | Interruptor general. Con `false`, `verify-sunat` y `scan --verify-sunat` terminan con código 2 y `doctor` la muestra como desactivada. |
+| `INVOICEBOT_SUNAT_VERIFY_ON_SCAN` | `false` | `true`: cada `scan` verifica al terminar las facturas pendientes. Se puede anular en una ejecución con `scan --no-verify-sunat`. Requiere `ENABLED=true`. |
+| `INVOICEBOT_SUNAT_RUC`, `_CLIENT_ID`, `_CLIENT_SECRET` | — | Credenciales de API SUNAT (ver abajo). El secreto nunca se muestra ni se registra en logs. |
+| `INVOICEBOT_SUNAT_TIMEOUT_MS` | `20000` | Espera máxima por consulta (1 000 – 120 000). |
+| `INVOICEBOT_SUNAT_DELAY_MS` | `0` | Pausa entre consultas consecutivas, para lotes grandes. |
+| `INVOICEBOT_SUNAT_AUTH_URL`, `_API_URL` | URLs oficiales | Solo para un proxy corporativo o un entorno de pruebas. |
+
+Si la verificación automática falla después de escanear (red caída, credenciales vencidas), lo escaneado queda guardado igualmente y el comando termina con código 3.
 
 Las incidencias de SUNAT se suman a las de validación y recalculan el estado de la factura: un comprobante anulado deja de exportarse por defecto. El resultado de cada consulta queda en la tabla `sunat_checks` y el último estado en la columna `sunat_status` del CSV. Las consultas son secuenciales; un fallo de red se registra y se reintenta en la siguiente ejecución, y unas credenciales inválidas detienen el lote.
 
-**Credenciales**: entra en SUNAT Operaciones en Línea con la Clave SOL de tu empresa → *Credenciales de API SUNAT*, registra una aplicación y copia su `client_id` y `client_secret` en `.env` (`INVOICEBOT_SUNAT_RUC`, `INVOICEBOT_SUNAT_CLIENT_ID`, `INVOICEBOT_SUNAT_CLIENT_SECRET`). Comprueba la conexión con `invoicebot doctor`. Referencia: [Manual de Consulta Integrada de Comprobante de Pago por Servicio Web](https://cpe.sunat.gob.pe/sites/default/files/inline-files/Manual-de-Consulta-Integrada-de-Comprobante-de-Pago-por-ServicioWEB_v2_0.pdf).
+**Credenciales**: entra en SUNAT Operaciones en Línea con la Clave SOL de tu empresa → *Credenciales de API SUNAT*, registra una aplicación y copia su `client_id` y `client_secret` en `.env` (`INVOICEBOT_SUNAT_RUC`, `INVOICEBOT_SUNAT_CLIENT_ID`, `INVOICEBOT_SUNAT_CLIENT_SECRET`) junto con `INVOICEBOT_SUNAT_ENABLED=true`. Comprueba la conexión con `invoicebot doctor`. Referencia: [Manual de Consulta Integrada de Comprobante de Pago por Servicio Web](https://cpe.sunat.gob.pe/sites/default/files/inline-files/Manual-de-Consulta-Integrada-de-Comprobante-de-Pago-por-ServicioWEB_v2_0.pdf).
 
 ## Seguridad y privacidad
 

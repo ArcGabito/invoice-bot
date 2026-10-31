@@ -165,6 +165,18 @@ describe('verifySunat', () => {
     expect((await verifySunat({ deps, sunatClient: retry })).checked).toBe(1);
   });
 
+  it('hace la pausa configurada entre consultas consecutivas', async () => {
+    const { deps } = await setup();
+    const sleep = vi.fn(async () => {});
+    const sunat = fakeSunat({
+      '00000001': { estadoCp: '1' },
+      '00000002': { estadoCp: '1' },
+      '00000003': { estadoCp: '1' },
+    });
+    await verifySunat({ deps, sunatClient: sunat, delayMs: 250, sleep });
+    expect(sleep.mock.calls).toEqual([[250], [250]]);
+  });
+
   it('se detiene ante credenciales inválidas', async () => {
     const { deps } = await setup();
     const authError = new SunatError('SUNAT rechazó las credenciales', { kind: 'sunat_auth' });

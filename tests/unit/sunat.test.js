@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { evaluateSunatResult } from '../../src/domain/sunat-status.js';
 import { SunatClient, createSunatClient } from '../../src/infrastructure/sunat/sunat-client.js';
 import { loadConfig } from '../../src/shared/config.js';
-import { ConfigError } from '../../src/shared/errors.js';
 
 const ok = (estadoCp, extra = {}) => ({
   estadoCp,
@@ -207,19 +206,57 @@ describe('SunatClient', () => {
 describe('createSunatClient', () => {
   const config = (env) => loadConfig({ env, loadEnvFile: false });
 
-  it('exige RUC, client_id y client_secret, sin copiar el secreto a la configuración', () => {
-    expect(() => createSunatClient(config({}), {})).toThrow(ConfigError);
-    const env = {
-      INVOICEBOT_SUNAT_RUC: '20555555551',
-      INVOICEBOT_SUNAT_CLIENT_ID: 'id',
-      INVOICEBOT_SUNAT_CLIENT_SECRET: 'secreto',
-    };
+  const credentials = {
+    INVOICEBOT_SUNAT_RUC: '20555555551',
+    INVOICEBOT_SUNAT_CLIENT_ID: 'id',
+    INVOICEBOT_SUNAT_CLIENT_SECRET: 'secreto',
+  };
+
+  it('está desactivada por defecto aunque haya credenciales', () => {
+    const cfg = config(credentials);
+    expect(cfg.sunat).toMatchObject({ enabled: false, verifyOnScan: false });
+    expect(() => createSunatClient(cfg, credentials)).toThrow(/INVOICEBOT_SUNAT_ENABLED=true/);
+  });
+
+  it('activada, exige RUC, client_id y client_secret, sin copiar el secreto a la configuración', () => {
+    expect(() => createSunatClient(config({ INVOICEBOT_SUNAT_ENABLED: 'true' }), {})).toThrow(
+      /INVOICEBOT_SUNAT_CLIENT_ID/,
+    );
+    const env = { ...credentials, INVOICEBOT_SUNAT_ENABLED: 'true' };
     const cfg = config(env);
     expect(JSON.stringify(cfg)).not.toContain('secreto');
     expect(createSunatClient(cfg, env)).toBeInstanceOf(SunatClient);
   });
 
-  it('rechaza un RUC consultante mal formado', () => {
+  it('aplica tiempo de espera y URLs configurables', () => {
+    const env = {
+      ...credentials,
+      INVOICEBOT_SUNAT_ENABLED: 'sí',
+      INVOICEBOT_SUNAT_TIMEOUT_MS: '5000',
+      INVOICEBOT_SUNAT_AUTH_URL: 'http://proxy.local/auth/',
+      INVOICEBOT_SUNAT_API_URL: 'http://proxy.local/api',
+    };
+    const client = createSunatClient(config(env), env);
+    expect(client).toMatchObject({
+      timeoutMs: 5000,
+      authUrl: 'http://proxy.local/auth',
+      apiUrl: 'http://proxy.local/api',
+    });
+    // Sin URLs propias se usan las oficiales.
+    const official = createSunatClient(
+      config({ ...credentials, INVOICEBOT_SUNAT_ENABLED: '1' }),
+      credentials,
+    );
+    expect(official.apiUrl).toBe('https://api.sunat.gob.pe/v1/contribuyente/contribuyentes');
+  });
+
+  it('valida los valores de configuración', () => {
     expect(() => config({ INVOICEBOT_SUNAT_RUC: '123' })).toThrow(/sunat\.ruc/);
+    expect(() => config({ INVOICEBOT_SUNAT_ENABLED: 'quizás' })).toThrow(/sunat\.enabled/);
+    expect(() => config({ INVOICEBOT_SUNAT_VERIFY_ON_SCAN: 'true' })).toThrow(
+      /requiere INVOICEBOT_SUNAT_ENABLED=true/,
+    );
+    expect(() => config({ INVOICEBOT_SUNAT_TIMEOUT_MS: '10' })).toThrow(/sunat\.timeoutMs/);
+    expect(() => config({ INVOICEBOT_SUNAT_API_URL: 'no es una url' })).toThrow(/sunat\.apiUrl/);
   });
 });

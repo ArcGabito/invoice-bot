@@ -1,7 +1,9 @@
 import path from 'node:path';
 import { scanInvoices } from '../../application/use-cases/scan-invoices.js';
+import { verifySunat } from '../../application/use-cases/verify-sunat.js';
 import { EXIT_CODES } from '../../shared/errors.js';
 import { formatDuration } from '../output.js';
+import { hasSunatProblems, printSunatSummary, sunatProgress } from './verify-sunat.js';
 
 const OUTCOME_LABEL = {
   valid: 'válido',
@@ -20,9 +22,18 @@ export function registerScan(program, run) {
     .argument('<ruta>', 'carpeta o archivo a procesar')
     .option('-r, --recursive', 'incluye subcarpetas', false)
     .option('--dry-run', 'inspecciona los archivos sin guardar nada ni llamar a la IA', false)
+    .option(
+      '--verify-sunat',
+      'al terminar, verifica en SUNAT las facturas pendientes (por defecto: INVOICEBOT_SUNAT_VERIFY_ON_SCAN)',
+    )
+    .option('--no-verify-sunat', 'no verifica en SUNAT aunque esté configurado')
     .action((target, options) =>
       run(async (ctx, out) => {
         if (!options.dryRun) void ctx.aiProvider; // valida la configuración del proveedor antes de empezar
+        // Si se pidió verificar, se comprueba la configuración de SUNAT antes de escanear.
+        const verify = !options.dryRun && (options.verifySunat ?? ctx.config.sunat.verifyOnScan);
+        const sunatClient = verify ? ctx.sunatClient : null;
+
         const summary = await scanInvoices({
           root: target,
           recursive: options.recursive,
@@ -39,13 +50,31 @@ export function registerScan(program, run) {
             }
           },
         });
-        out.data({ dryRun: options.dryRun, ...summary, database: ctx.config.dbPath });
+        let sunat = null;
+        if (sunatClient) {
+          try {
+            sunat = await verifySunat({ deps: ctx, sunatClient, onProgress: sunatProgress(out) });
+          } catch (error) {
+            // Lo escaneado ya está guardado; solo la verificación quedó incompleta.
+            sunat = { error: error.message };
+          }
+        }
+
+        out.data({ dryRun: options.dryRun, ...summary, database: ctx.config.dbPath, sunat });
         printSummary(out, summary, {
           dryRun: options.dryRun,
           dbPath: ctx.config.dbPath,
           version: program.version(),
         });
-        return summary.failed > 0 || summary.error > 0 ? EXIT_CODES.PARTIAL : EXIT_CODES.OK;
+        if (sunat) {
+          out.line();
+          out.line('Verificación SUNAT');
+          if (sunat.error) out.line(`  No se completó: ${sunat.error}`);
+          else printSunatSummary(out, sunat);
+        }
+        const scanProblems = summary.failed > 0 || summary.error > 0;
+        const sunatProblems = sunat !== null && (Boolean(sunat.error) || hasSunatProblems(sunat));
+        return scanProblems || sunatProblems ? EXIT_CODES.PARTIAL : EXIT_CODES.OK;
       }),
     );
 }

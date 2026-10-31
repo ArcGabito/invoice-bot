@@ -255,7 +255,8 @@ describe('retryDocuments', () => {
 
 describe('exportInvoices', () => {
   it('exporta el mes con encabezados estables, sin errores ni duplicados por defecto', async () => {
-    const { deps, inbox } = setup();
+    // Concurrencia 1: así es fijo qué copia recibe la advertencia de duplicado.
+    const { deps, inbox } = setup({ env: { INVOICEBOT_CONCURRENCY: '1' } });
     writeTextPdf(path.join(inbox, 'a.pdf'), sampleInvoiceLines());
     writeTextPdf(path.join(inbox, 'b-reimpresion.pdf'), [...sampleInvoiceLines(), 'copia']);
     writeTextPdf(

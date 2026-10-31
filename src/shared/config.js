@@ -17,15 +17,30 @@ const ConfigSchema = z.object({
     url: z.url(),
     model: z.string().min(1),
   }),
-  sunat: z.object({
-    /** RUC de la empresa que consulta (el de las credenciales de API SUNAT). */
-    ruc: z
-      .string()
-      .regex(/^\d{11}$/, 'debe tener 11 dígitos')
-      .nullable(),
-    clientId: z.string().min(1).nullable(),
-    clientSecretSet: z.boolean(),
-  }),
+  sunat: z
+    .object({
+      /** Interruptor general: sin él, ninguna función consulta a SUNAT. */
+      enabled: z.boolean({ error: 'usa true o false' }),
+      /** Verificar automáticamente las facturas nuevas al terminar `scan`. */
+      verifyOnScan: z.boolean({ error: 'usa true o false' }),
+      /** RUC de la empresa que consulta (el de las credenciales de API SUNAT). */
+      ruc: z
+        .string()
+        .regex(/^\d{11}$/, 'debe tener 11 dígitos')
+        .nullable(),
+      clientId: z.string().min(1).nullable(),
+      clientSecretSet: z.boolean(),
+      timeoutMs: z.int().min(1000).max(120_000),
+      /** Pausa entre consultas consecutivas, para no saturar el servicio. */
+      delayMs: z.int().min(0).max(60_000),
+      /** null = URL oficial de SUNAT. Permite usar un proxy corporativo o un entorno de pruebas. */
+      authUrl: z.url().nullable(),
+      apiUrl: z.url().nullable(),
+    })
+    .refine((s) => s.enabled || !s.verifyOnScan, {
+      message: 'INVOICEBOT_SUNAT_VERIFY_ON_SCAN requiere INVOICEBOT_SUNAT_ENABLED=true',
+      path: ['verifyOnScan'],
+    }),
   dataDir: z.string().min(1),
   dbPath: z.string().min(1),
   exportDir: z.string().min(1),
@@ -40,6 +55,15 @@ function intFrom(value, fallback) {
   if (value === undefined || value === '') return fallback;
   const n = Number(value);
   return Number.isInteger(n) ? n : Number.NaN;
+}
+
+/** "true"/"false" (también 1/0, sí/no). Un valor no reconocido se deja tal cual para que falle la validación. */
+function boolFrom(value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  const text = String(value).trim().toLowerCase();
+  if (['true', '1', 'si', 'sí', 'yes'].includes(text)) return true;
+  if (['false', '0', 'no'].includes(text)) return false;
+  return value;
 }
 
 /**
@@ -73,9 +97,15 @@ export function loadConfig({
       model: env.INVOICEBOT_OLLAMA_MODEL || 'qwen3:8b',
     },
     sunat: {
+      enabled: boolFrom(env.INVOICEBOT_SUNAT_ENABLED, false),
+      verifyOnScan: boolFrom(env.INVOICEBOT_SUNAT_VERIFY_ON_SCAN, false),
       ruc: env.INVOICEBOT_SUNAT_RUC || null,
       clientId: env.INVOICEBOT_SUNAT_CLIENT_ID || null,
       clientSecretSet: Boolean(env.INVOICEBOT_SUNAT_CLIENT_SECRET),
+      timeoutMs: intFrom(env.INVOICEBOT_SUNAT_TIMEOUT_MS, 20_000),
+      delayMs: intFrom(env.INVOICEBOT_SUNAT_DELAY_MS, 0),
+      authUrl: env.INVOICEBOT_SUNAT_AUTH_URL || null,
+      apiUrl: env.INVOICEBOT_SUNAT_API_URL || null,
     },
     dataDir,
     dbPath: path.resolve(dataDir, overrides.dbFile ?? env.INVOICEBOT_DB_FILE ?? 'invoicebot.db'),

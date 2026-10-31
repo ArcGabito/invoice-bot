@@ -15,6 +15,11 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - Comando `verify-sunat`: consulta el servicio oficial de SUNAT (Consulta Integrada de Comprobante de Pago) para saber si cada comprobante está aceptado, anulado o no informado, y si el RUC emisor está activo y habido. Las respuestas generan incidencias `SUNAT_*` que recalculan el estado de la factura; cada consulta queda en `sunat_checks`.
 - Columna `sunat_status` en facturas y en el CSV.
 - `doctor` y `config` muestran la configuración de la API SUNAT (opcional).
+- Verificación en SUNAT configurable: `INVOICEBOT_SUNAT_ENABLED` (interruptor general, desactivado por defecto), `INVOICEBOT_SUNAT_VERIFY_ON_SCAN` (verificar al terminar `scan`; anulable con `scan --no-verify-sunat` o forzable con `--verify-sunat`), tiempo de espera, pausa entre consultas y URLs propias para proxy o entorno de pruebas.
+
+### Corregido
+
+- Entre posibles duplicados sin XML, la exportación conserva el del primer documento registrado y no el que terminó antes de procesarse; antes el resultado podía variar según la concurrencia.
 
 ### Cambiado
 

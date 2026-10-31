@@ -8,6 +8,8 @@ import { SUPPORTED_DOCUMENT_TYPES } from '../../infrastructure/sunat/sunat-clien
  * servicio. Un fallo puntual (red, rechazo de una consulta) se registra y el
  * lote continúa; credenciales inválidas detienen el lote, porque todas las
  * consultas siguientes fallarían igual.
+ *
+ * `delayMs` (INVOICEBOT_SUNAT_DELAY_MS) introduce una pausa entre consultas.
  */
 export async function verifySunat({
   deps,
@@ -15,6 +17,8 @@ export async function verifySunat({
   month = null,
   force = false,
   limit = null,
+  delayMs = deps.config?.sunat?.delayMs ?? 0,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onProgress = () => {},
 }) {
   const { repository, logger } = deps;
@@ -42,6 +46,7 @@ export async function verifySunat({
   summary.candidates = invoices.length;
 
   for (const [index, invoice] of invoices.entries()) {
+    if (index > 0 && delayMs > 0) await sleep(delayMs);
     const label = `${invoice.series}-${invoice.number}`;
     let outcome;
     try {

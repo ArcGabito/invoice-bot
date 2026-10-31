@@ -26,13 +26,24 @@ export function registerConfig(program, run) {
         }
         if (c.aiProvider === 'ollama')
           out.line(`  Ollama:             ${c.ollama.url} · ${c.ollama.model}`);
-        out.line(
-          `SUNAT (validez):      ${
-            c.sunat.ruc
-              ? `RUC ${c.sunat.ruc} · client_id ${c.sunat.clientId ? 'definido' : 'no definido'} · client_secret ${c.sunat.clientSecretSet ? 'definido' : 'no definido'}`
-              : 'no configurado (opcional)'
-          }`,
-        );
+        const s = c.sunat;
+        if (!s.enabled) {
+          out.line('Verificación SUNAT:   desactivada (INVOICEBOT_SUNAT_ENABLED=false)');
+        } else {
+          out.line(
+            `Verificación SUNAT:   activada${s.verifyOnScan ? ', automática al escanear' : ', manual (verify-sunat)'}`,
+          );
+          out.line(`  RUC consultante:    ${s.ruc ?? 'no definido'}`);
+          out.line(
+            `  Credenciales:       client_id ${s.clientId ? 'definido' : 'no definido'} · client_secret ${s.clientSecretSet ? 'definido' : 'no definido'}`,
+          );
+          out.line(
+            `  Conexión:           espera máx. ${s.timeoutMs / 1000} s · pausa entre consultas ${s.delayMs} ms`,
+          );
+          if (s.authUrl || s.apiUrl) {
+            out.line(`  URLs propias:       ${[s.authUrl, s.apiUrl].filter(Boolean).join(' · ')}`);
+          }
+        }
         out.line(`Directorio de datos:  ${c.dataDir}`);
         out.line(`Base de datos:        ${c.dbPath}`);
         out.line(`Exportaciones:        ${c.exportDir}`);
@@ -96,11 +107,11 @@ export function registerDoctor(program, run) {
         if (!options.offline) {
           await check(`Proveedor de IA (${ctx.config.aiProvider})`, () => ctx.aiProvider.ping());
         }
-        if (!ctx.config.sunat.ruc && !ctx.config.sunat.clientId) {
+        if (!ctx.config.sunat.enabled) {
           await check(
             'API SUNAT',
             () => {
-              throw new Error('no configurada (opcional; necesaria para invoicebot verify-sunat)');
+              throw new Error('desactivada (opcional; activa con INVOICEBOT_SUNAT_ENABLED=true)');
             },
             { optional: true },
           );

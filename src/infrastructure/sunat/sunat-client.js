@@ -169,9 +169,18 @@ export class SunatClient {
   }
 }
 
-/** Crea el cliente a partir de la configuración; el secreto se lee del entorno. */
+/**
+ * Crea el cliente a partir de la configuración; el secreto se lee del entorno.
+ * La verificación en SUNAT es opcional y debe activarse explícitamente.
+ */
 export function createSunatClient(config, env = process.env) {
-  const { ruc, clientId, clientSecretSet } = config.sunat;
+  const { enabled, ruc, clientId, clientSecretSet, timeoutMs, authUrl, apiUrl } = config.sunat;
+  if (!enabled) {
+    throw new ConfigError(
+      'La verificación en SUNAT está desactivada. Para usarla, define INVOICEBOT_SUNAT_ENABLED=true ' +
+        'y las credenciales de API SUNAT en .env.',
+    );
+  }
   const missing = [
     !ruc && 'INVOICEBOT_SUNAT_RUC',
     !clientId && 'INVOICEBOT_SUNAT_CLIENT_ID',
@@ -183,5 +192,12 @@ export function createSunatClient(config, env = process.env) {
         'Se generan en SUNAT Operaciones en Línea → Credenciales de API SUNAT.',
     );
   }
-  return new SunatClient({ ruc, clientId, clientSecret: env.INVOICEBOT_SUNAT_CLIENT_SECRET });
+  return new SunatClient({
+    ruc,
+    clientId,
+    clientSecret: env.INVOICEBOT_SUNAT_CLIENT_SECRET,
+    timeoutMs,
+    ...(authUrl && { authUrl }),
+    ...(apiUrl && { apiUrl }),
+  });
 }

@@ -47,10 +47,11 @@ describe('invoicebot CLI', { timeout: 30_000 }, () => {
     expect(cli('scan').code).toBe(2);
     expect(cli('export', '--month', '2026-1').code).toBe(2);
     expect(cli('--provider', 'chatbot', 'config').code).toBe(2);
-    // Sin credenciales de API SUNAT, verify-sunat explica qué falta.
+    // La verificación en SUNAT está desactivada por defecto y lo explica.
     const sunat = cli('verify-sunat');
     expect(sunat.code).toBe(2);
-    expect(sunat.stderr).toContain('INVOICEBOT_SUNAT_CLIENT_ID');
+    expect(sunat.stderr).toContain('INVOICEBOT_SUNAT_ENABLED=true');
+    expect(cli('scan', './facturas', '--verify-sunat').code).toBe(2);
   });
 
   it('scan devuelve 3 si hay facturas con errores y muestra el resumen', () => {
