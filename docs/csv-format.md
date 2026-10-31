@@ -39,6 +39,7 @@ Las columnas, su orden y sus nombres son estables dentro de una versión mayor. 
 | `prepaid_amount` | decimal | Anticipos ya pagados y deducidos del total de este comprobante. Añadida en v0.2.0. |
 | `supplier_tax_id` | texto o vacío | Identificador fiscal de un proveedor del exterior (EIN, VAT ID…). Añadida en v0.2.0. |
 | `supplier_country` | ISO 3166 o vacío | País del proveedor (`PE` en comprobantes electrónicos XML). Añadida en v0.2.0. |
+| `review_status` | `pending`, `approved` | Revisión humana: pendiente o aprobada por una persona (las rechazadas no se exportan). Añadida en v0.2.0. |
 
 **Importes**: punto como separador decimal, dos decimales, sin separador de miles ni símbolo de moneda (`1234.50`). Un campo vacío significa que el dato no aparece en el comprobante; no equivale a cero.
 

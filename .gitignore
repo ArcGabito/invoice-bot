@@ -35,3 +35,6 @@ Thumbs.db
 
 # Artefactos de compilación de Visual Studio
 obj/
+
+# Configuración local de herramientas
+/.claude/

@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { loadConfig } from '../shared/config.js';
 import { openDatabase } from '../infrastructure/database/connection.js';
 import { SqliteInvoiceRepository } from '../infrastructure/database/repositories/sqlite-invoice-repository.js';
@@ -32,6 +33,8 @@ export function createContext(globalOptions = {}) {
   return {
     config,
     logger,
+    /** Quién firma las acciones de revisión en el historial. */
+    reviewer: globalOptions.user || process.env.INVOICEBOT_USER || os.userInfo().username,
     get db() {
       db ??= openDatabase(config.dbPath, { backupDir: config.backup.dir });
       return db;

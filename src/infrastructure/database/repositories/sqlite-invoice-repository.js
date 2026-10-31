@@ -203,7 +203,8 @@ export class SqliteInvoiceRepository {
         this.db
           .prepare(
             `UPDATE invoices SET ${sets}, extraction_run_id = ?, business_key = ?, validation_status = ?,
-               rules_version = ?, updated_at = ?, sunat_status = NULL, sunat_checked_at = NULL
+               rules_version = ?, updated_at = ?, sunat_status = NULL, sunat_checked_at = NULL,
+               review_status = 'pending', reviewed_at = NULL, reviewed_by = NULL, corrected = 0
              WHERE id = ?`,
           )
           .run(
@@ -285,7 +286,7 @@ export class SqliteInvoiceRepository {
       .prepare(
         `SELECT i.id, i.document_id, d.file_name, d.file_path FROM invoices i
          JOIN documents d ON d.id = i.document_id
-         WHERE i.business_key = ? AND i.document_id <> ? ORDER BY i.id`,
+         WHERE i.business_key = ? AND i.document_id <> ? AND i.review_status <> 'rejected' ORDER BY i.id`,
       )
       .all(businessKey, excludeDocumentId);
   }
@@ -313,7 +314,8 @@ export class SqliteInvoiceRepository {
       .get();
     const possibleDuplicates = this.db
       .prepare(
-        `SELECT COUNT(*) FROM (SELECT business_key FROM invoices WHERE business_key IS NOT NULL
+        `SELECT COUNT(*) FROM (SELECT business_key FROM invoices
+         WHERE business_key IS NOT NULL AND review_status <> 'rejected'
          GROUP BY business_key HAVING COUNT(*) > 1)`,
       )
       .pluck()
@@ -325,7 +327,13 @@ export class SqliteInvoiceRepository {
          FROM extraction_runs`,
       )
       .get();
-    return { documents, invoices, exactDuplicates, possibleDuplicates, runs };
+    const review = Object.fromEntries(
+      this.db
+        .prepare('SELECT review_status, COUNT(*) AS n FROM invoices GROUP BY review_status')
+        .all()
+        .map((r) => [r.review_status, r.n]),
+    );
+    return { documents, invoices, review, exactDuplicates, possibleDuplicates, runs };
   }
 
   listExactDuplicates() {
@@ -345,7 +353,9 @@ export class SqliteInvoiceRepository {
         `SELECT i.business_key, i.id AS invoice_id, i.document_id, d.file_path, i.supplier_ruc, i.document_type,
            i.series, i.number, i.issue_date, i.currency, i.total_cents
          FROM invoices i JOIN documents d ON d.id = i.document_id
-         WHERE i.business_key IN (SELECT business_key FROM invoices WHERE business_key IS NOT NULL
+         WHERE i.review_status <> 'rejected'
+           AND i.business_key IN (SELECT business_key FROM invoices
+                                  WHERE business_key IS NOT NULL AND review_status <> 'rejected'
                                   GROUP BY business_key HAVING COUNT(*) > 1)
          ORDER BY i.business_key, i.id`,
       )
@@ -371,6 +381,7 @@ export class SqliteInvoiceRepository {
       where.push('i.issue_date LIKE ?');
       params.push(`${month}-%`);
     }
+    where.push("i.review_status <> 'rejected'");
     if (validationStatuses?.length) {
       where.push(`i.validation_status IN (${validationStatuses.map(() => '?').join(', ')})`);
       params.push(...validationStatuses);
@@ -385,7 +396,8 @@ export class SqliteInvoiceRepository {
     }
     if (!includeDuplicates) {
       where.push(
-        `(i.business_key IS NULL OR i.id = (SELECT i2.id FROM invoices i2 WHERE i2.business_key = i.business_key
+        `(i.business_key IS NULL OR i.id = (SELECT i2.id FROM invoices i2
+           WHERE i2.business_key = i.business_key AND i2.review_status <> 'rejected'
            ORDER BY CASE i2.data_source WHEN 'xml' THEN 0 ELSE 1 END, i2.document_id LIMIT 1))`,
       );
     }
@@ -401,13 +413,181 @@ export class SqliteInvoiceRepository {
   listInvoicesNeedingReview() {
     return this.db
       .prepare(
-        `SELECT i.id AS invoice_id, i.document_id, i.validation_status, i.supplier_ruc, i.series, i.number,
-           i.issue_date, i.currency, i.total_cents, d.file_path
+        `SELECT i.id AS invoice_id, i.document_id, i.validation_status, i.review_status, i.supplier_name,
+           i.supplier_ruc, i.document_type, i.series, i.number, i.issue_date, i.currency, i.total_cents,
+           d.file_path, d.file_name
          FROM invoices i JOIN documents d ON d.id = i.document_id
-         WHERE i.validation_status IN ('error', 'warning')
+         WHERE i.validation_status IN ('error', 'warning') AND i.review_status <> 'rejected'
          ORDER BY CASE i.validation_status WHEN 'error' THEN 0 ELSE 1 END, i.id`,
       )
       .all();
+  }
+
+  // --- Revisión humana -----------------------------------------------------
+
+  /** Ejecuta `fn` en una transacción: o se aplican todos los cambios o ninguno. */
+  transaction(fn) {
+    return this.db.transaction(fn)();
+  }
+
+  /** Factura con los datos de su documento original, o null. */
+  getInvoiceDetail(invoiceId) {
+    return (
+      this.db
+        .prepare(
+          `SELECT i.*, d.file_path, d.file_name, d.mime_type, d.sha256, d.page_count
+           FROM invoices i JOIN documents d ON d.id = i.document_id WHERE i.id = ?`,
+        )
+        .get(invoiceId) ?? null
+    );
+  }
+
+  listInvoicesByReviewStatus(status, limit = 200) {
+    return this.db
+      .prepare(
+        `SELECT i.id AS invoice_id, i.document_id, i.validation_status, i.review_status, i.supplier_name,
+           i.supplier_ruc, i.document_type, i.series, i.number, i.issue_date, i.currency, i.total_cents,
+           i.reviewed_by, i.reviewed_at, d.file_name
+         FROM invoices i JOIN documents d ON d.id = i.document_id
+         WHERE i.review_status = ? ORDER BY i.reviewed_at DESC, i.id DESC LIMIT ?`,
+      )
+      .all(status, limit);
+  }
+
+  listReviewActions(invoiceId) {
+    return this.db
+      .prepare('SELECT * FROM review_actions WHERE invoice_id = ? ORDER BY id')
+      .all(invoiceId);
+  }
+
+  recordReviewAction({
+    invoiceId,
+    action,
+    user,
+    field = null,
+    oldValue = null,
+    newValue = null,
+    issueId = null,
+    note = null,
+  }) {
+    this.db
+      .prepare(
+        `INSERT INTO review_actions (invoice_id, action, field, old_value, new_value, issue_id, note, user, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        invoiceId,
+        action,
+        field,
+        oldValue === null ? null : String(oldValue),
+        newValue === null ? null : String(newValue),
+        issueId,
+        note,
+        user,
+        now(),
+      );
+  }
+
+  setReviewStatus(invoiceId, status, user) {
+    const pending = status === 'pending';
+    this.db
+      .prepare(
+        'UPDATE invoices SET review_status = ?, reviewed_at = ?, reviewed_by = ?, updated_at = ? WHERE id = ?',
+      )
+      .run(status, pending ? null : now(), pending ? null : user, now(), invoiceId);
+  }
+
+  /** Marca como resueltas las incidencias abiertas de las severidades indicadas. */
+  resolveOpenIssues(invoiceId, { severities, user, note = null }) {
+    return this.db
+      .prepare(
+        `UPDATE validation_issues SET resolved_at = ?, resolved_by = ?, resolution_note = ?
+         WHERE invoice_id = ? AND resolved_at IS NULL
+           AND severity IN (${severities.map(() => '?').join(', ')})`,
+      )
+      .run(now(), user, note, invoiceId, ...severities).changes;
+  }
+
+  getIssue(issueId) {
+    return this.db.prepare('SELECT * FROM validation_issues WHERE id = ?').get(issueId) ?? null;
+  }
+
+  resolveIssue(issueId, { user, note = null }) {
+    this.db
+      .prepare(
+        'UPDATE validation_issues SET resolved_at = ?, resolved_by = ?, resolution_note = ? WHERE id = ?',
+      )
+      .run(now(), user, note, issueId);
+  }
+
+  /** Vuelve a abrir todas las incidencias resueltas de una factura. */
+  reopenIssues(invoiceId) {
+    return this.db
+      .prepare(
+        `UPDATE validation_issues SET resolved_at = NULL, resolved_by = NULL, resolution_note = NULL
+         WHERE invoice_id = ? AND resolved_at IS NOT NULL`,
+      )
+      .run(invoiceId).changes;
+  }
+
+  /** Aplica correcciones manuales ({ columna: valor }) y marca la factura como corregida. */
+  updateInvoiceFields(invoiceId, changes) {
+    const columns = Object.keys(changes).filter((c) => INVOICE_COLUMNS.includes(c));
+    if (columns.length === 0) return;
+    this.db
+      .prepare(
+        `UPDATE invoices SET ${columns.map((c) => `${c} = ?`).join(', ')}, corrected = 1, updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(...columns.map((c) => changes[c]), now(), invoiceId);
+  }
+
+  /** La consulta a SUNAT deja de valer si cambian los datos consultados: se repetirá. */
+  clearSunatStatus(invoiceId) {
+    this.db
+      .prepare('UPDATE invoices SET sunat_status = NULL, sunat_checked_at = NULL WHERE id = ?')
+      .run(invoiceId);
+  }
+
+  setBusinessKey(invoiceId, businessKey) {
+    this.db
+      .prepare('UPDATE invoices SET business_key = ? WHERE id = ?')
+      .run(businessKey, invoiceId);
+  }
+
+  /**
+   * Reemplaza las incidencias abiertas que salen de las reglas de validación;
+   * las que `isPreserved` indique (SUNAT, duplicados, notas) se mantienen.
+   */
+  replaceRuleIssues(invoiceId, issues, isPreserved) {
+    const existing = this.db
+      .prepare(
+        'SELECT id, rule_code FROM validation_issues WHERE invoice_id = ? AND resolved_at IS NULL',
+      )
+      .all(invoiceId);
+    const remove = this.db.prepare('DELETE FROM validation_issues WHERE id = ?');
+    for (const row of existing) if (!isPreserved(row.rule_code)) remove.run(row.id);
+    const insert = this.db.prepare(
+      `INSERT INTO validation_issues (invoice_id, rule_code, severity, message, expected_value, actual_value)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    for (const i of issues) {
+      insert.run(invoiceId, i.rule_code, i.severity, i.message, i.expected_value, i.actual_value);
+    }
+  }
+
+  /** Recalcula el estado de validación con las incidencias abiertas. */
+  recomputeValidationStatus(invoiceId) {
+    const open = this.db
+      .prepare(
+        'SELECT severity FROM validation_issues WHERE invoice_id = ? AND resolved_at IS NULL',
+      )
+      .all(invoiceId);
+    const status = statusFromIssues(open);
+    this.db
+      .prepare('UPDATE invoices SET validation_status = ?, updated_at = ? WHERE id = ?')
+      .run(status, now(), invoiceId);
+    return status;
   }
 
   // --- Ejecuciones desatendidas --------------------------------------------

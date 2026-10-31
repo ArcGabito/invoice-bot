@@ -101,7 +101,7 @@ export function registerReview(program, run) {
         out.line(`Facturas por revisar: ${queue.invoices.length}`);
         for (const row of queue.invoices) {
           out.line(
-            `  [${row.validation_status === 'error' ? 'ERROR' : 'AVISO'}] #${row.document_id} ${invoiceLabel(row)}`,
+            `  [${row.validation_status === 'error' ? 'ERROR' : 'AVISO'}] Factura #${row.invoice_id} ${invoiceLabel(row)}`,
           );
           out.line(`      ${row.file_path}`);
           for (const i of row.issues) {
@@ -111,8 +111,17 @@ export function registerReview(program, run) {
             ]
               .filter(Boolean)
               .join(', ');
-            out.line(`      · ${i.rule_code}: ${i.message}${detail ? ` (${detail})` : ''}`);
+            out.line(
+              `      · [#${i.id}] ${i.rule_code}: ${i.message}${detail ? ` (${detail})` : ''}`,
+            );
           }
+        }
+        if (queue.invoices.length) {
+          out.line();
+          out.line(
+            'Para revisar: invoicebot show <factura> · approve <factura> · correct <factura> campo=valor · reject <factura> -r "motivo" · resolve <incidencia>',
+          );
+          out.line('O con pantalla: invoicebot serve');
         }
         out.line();
         out.line(`Documentos fallidos: ${queue.failed.length}`);

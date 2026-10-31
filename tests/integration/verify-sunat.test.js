@@ -105,9 +105,11 @@ describe('verifySunat', () => {
     const csv = fs.readFileSync(result.path, 'utf8').trim().split('\r\n');
     expect(result.rows).toBe(2);
     expect(
-      csv[0].endsWith(',data_source,sunat_status,prepaid_amount,supplier_tax_id,supplier_country'),
+      csv[0].endsWith(
+        ',data_source,sunat_status,prepaid_amount,supplier_tax_id,supplier_country,review_status',
+      ),
     ).toBe(true);
-    expect(csv.find((l) => l.includes('00000001'))).toMatch(/,xml,ACEPTADO,,,PE$/);
+    expect(csv.find((l) => l.includes('00000001'))).toMatch(/,xml,ACEPTADO,,,PE,pending$/);
   });
 
   it('sin --force solo vuelve a consultar lo no informado y reemplaza sus incidencias', async () => {

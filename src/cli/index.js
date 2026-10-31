@@ -11,6 +11,8 @@ import { registerConfig, registerDoctor } from './commands/diagnostics.js';
 import { registerVerifySunat } from './commands/verify-sunat.js';
 import { registerRun } from './commands/run.js';
 import { registerBackup } from './commands/backup.js';
+import { registerReviewActions } from './commands/review-actions.js';
+import { registerServe } from './commands/serve.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 
@@ -33,6 +35,10 @@ export function buildProgram() {
     .option('--concurrency <n>', 'documentos procesados en paralelo', parsePositiveInt)
     .option('--json', 'salida en JSON para automatización', false)
     .option('--verbose', 'muestra logs de progreso en stderr', false)
+    .option(
+      '--user <nombre>',
+      'quién revisa (por defecto: INVOICEBOT_USER o el usuario de Windows)',
+    )
     .showHelpAfterError()
     .exitOverride();
 
@@ -61,6 +67,8 @@ export function buildProgram() {
   registerVerifySunat(program, run);
   registerRun(program, run);
   registerBackup(program, run);
+  registerReviewActions(program, run);
+  registerServe(program, run);
   registerConfig(program, run);
   return program;
 }

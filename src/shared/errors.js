@@ -42,6 +42,13 @@ export class ExtractionError extends InvoiceBotError {
   }
 }
 
+/** Acción de revisión no permitida (factura inexistente, sin nota, con errores…). Código de salida 2. */
+export class ReviewError extends InvoiceBotError {
+  constructor(message, options = {}) {
+    super(message, { code: 'REVIEW_ERROR', exitCode: EXIT_CODES.USAGE_ERROR, ...options });
+  }
+}
+
 export class DocumentReadError extends InvoiceBotError {
   constructor(message, { cause } = {}) {
     super(message, { code: 'DOCUMENT_READ_ERROR', cause });

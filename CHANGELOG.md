@@ -22,6 +22,7 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - Comando `backup`: copia con `VACUUM INTO`, verificada con `integrity_check`, y retención configurable (`INVOICEBOT_BACKUP_*`).
 - Logs en archivo, uno por día, con borrado tras `INVOICEBOT_LOG_RETENTION_DAYS` (`INVOICEBOT_LOG_DIR`).
 - Columna `prepaid_amount` (anticipos) en facturas, CSV y Excel. Migración 004.
+- Revisión humana: comandos `show`, `approve`, `reject`, `reopen`, `correct` y `resolve`, y pantalla web local `serve` (bandeja, datos editables, incidencias, documento original e historial). Aprobar con errores exige `--force` y una nota; rechazar exige un motivo; corregir revalida y recalcula duplicados. Auditoría completa en `review_actions` (migración 006), columna `review_status` en las exportaciones y opción global `--user`. Las facturas rechazadas no se exportan ni cuentan como duplicados.
 - Facturas de proveedores del extranjero: tipo 91 (no domiciliado), columnas `supplier_tax_id` y `supplier_country` (migración 005), validaciones propias (sin RUC, serie SUNAT ni IGV; nota informativa sobre sus obligaciones), duplicados por identificador fiscal o nombre y exclusión de la verificación en SUNAT. Probado con 13 facturas reales de Cloudflare.
 - Fechas con el mes en letras, en inglés o en español ("August 5, 2025", "5 de agosto de 2025"), y nombres de país convertidos a código ISO.
 

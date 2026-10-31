@@ -69,6 +69,8 @@ const ConfigSchema = z.object({
       .min(1)
       .max(24 * 30),
   }),
+  /** Pantalla de revisión local (`invoicebot serve`); solo escucha en 127.0.0.1. */
+  serve: z.object({ port: z.int().min(1024).max(65535) }),
   /** Ejecución desatendida (`invoicebot run`). */
   run: z.object({
     /** Carpeta de entrada; puede ser una carpeta de OneDrive o SharePoint sincronizada. */
@@ -160,6 +162,7 @@ export function loadConfig({
       retention: intFrom(env.INVOICEBOT_BACKUP_RETENTION, 14),
       intervalHours: intFrom(env.INVOICEBOT_BACKUP_INTERVAL_HOURS, 24),
     },
+    serve: { port: intFrom(env.INVOICEBOT_SERVE_PORT, 4317) },
     run: {
       inboxDir: env.INVOICEBOT_INBOX_DIR ? path.resolve(cwd, env.INVOICEBOT_INBOX_DIR) : null,
       recursive: boolFrom(env.INVOICEBOT_INBOX_RECURSIVE, true),

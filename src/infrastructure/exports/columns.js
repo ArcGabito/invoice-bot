@@ -39,6 +39,7 @@ export const EXPORT_COLUMNS = Object.freeze([
   { key: 'prepaid_amount', label: 'Anticipos', type: 'amount' },
   { key: 'supplier_tax_id', label: 'ID fiscal emisor (exterior)', type: 'text', width: 16 },
   { key: 'supplier_country', label: 'País emisor', type: 'text', width: 8 },
+  { key: 'review_status', label: 'Revisión', type: 'text', width: 10 },
 ]);
 
 /** Valor de una columna para una fila de la consulta de exportación. */

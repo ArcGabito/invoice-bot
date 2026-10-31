@@ -28,7 +28,7 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 | Facturas con anticipos | ✅ |
 | Facturas de proveedores del extranjero (no domiciliados, tipo 91): AWS, Google, Cloudflare… | ✅ |
 | OCR para PDFs escaneados e imágenes | ⏳ v0.2.0 — hoy quedan en estado `needs_ocr` |
-| Revisión manual interactiva y resolución de incidencias | ⏳ v0.3.0 |
+| Revisión humana: pantalla web local y comandos para aprobar, rechazar y corregir, con auditoría | ✅ |
 
 ## Instalación
 
@@ -94,6 +94,12 @@ Base de datos: C:\...\invoice-bot\data\invoicebot.db
 | `invoicebot run` | Ciclo desatendido: reintenta, escanea la carpeta de entrada, verifica, exporta y respalda. |
 | `invoicebot run --watch` | Repite el ciclo cada `INVOICEBOT_RUN_INTERVAL_MINUTES` hasta detenerlo. |
 | `invoicebot backup` | Copia verificada de la base de datos (`--list` para ver las existentes). |
+| `invoicebot serve --open` | Abre la **pantalla de revisión** en el navegador. |
+| `invoicebot show <factura>` | Datos, incidencias e historial de una factura. |
+| `invoicebot approve <factura>` | Aprueba: confirma los datos y resuelve las advertencias (`--force -n "motivo"` si tiene errores). |
+| `invoicebot correct <factura> campo=valor…` | Corrige datos y revalida (`total=118.00 issue_date=15/10/2026`). |
+| `invoicebot reject <factura> -r "motivo"` | Rechaza: deja de exportarse y de aparecer en la bandeja. |
+| `invoicebot reopen <factura>` · `resolve <incidencia>` | Devuelve a pendiente · da por resuelta una incidencia concreta. |
 | `invoicebot doctor` | Comprueba Node.js, SQLite, lectura de PDF, OCR y conexión con la IA. |
 | `invoicebot config` | Muestra la configuración efectiva sin revelar secretos. |
 
@@ -112,6 +118,22 @@ Por defecto se exportan las facturas **válidas y con advertencias**, y se exclu
 - **CSV**: usa `--bom --delimiter ";"` si lo vas a abrir en Excel con configuración regional en español.
 
 Las columnas, comunes a ambos formatos, están documentadas en [docs/csv-format.md](docs/csv-format.md).
+
+### Revisión humana
+
+El bot no decide solo: lo que tiene errores o advertencias queda **por revisar**. La pantalla de revisión muestra la bandeja, los datos editables, las incidencias y el documento original lado a lado:
+
+```bash
+invoicebot serve --open
+```
+
+- **Aprobar** confirma la factura y resuelve sus advertencias. Si tiene errores, solo se puede aprobar con una nota que lo justifique.
+- **Corregir** cualquier dato la revalida al instante con las mismas reglas (y recalcula duplicados; si cambia RUC, serie, número, fecha o total, se vuelve a consultar en SUNAT).
+- **Rechazar** exige un motivo: la factura sale de la bandeja, de los duplicados y de las exportaciones. **Reabrir** la devuelve a pendiente.
+- Cada acción queda en la tabla `review_actions` con quién la hizo, cuándo y el valor anterior y nuevo; `invoicebot show <factura>` y la pantalla muestran ese historial. Quién revisa es el usuario de Windows, o `--user` / `INVOICEBOT_USER`.
+- Las exportaciones incluyen la columna `review_status` (pendiente, aprobada).
+
+La pantalla escucha solo en `127.0.0.1` (no es accesible desde la red), comprueba la cabecera `Host` y exige un token aleatorio por sesión en cada llamada, con una política de seguridad de contenido estricta. Puerto: `INVOICEBOT_SERVE_PORT` (4317).
 
 ### Ejecución desatendida (RPA)
 
