@@ -5,22 +5,37 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { sampleInvoiceLines, writeTextPdf } from '../helpers/pdf-builder.ts';
 import { buildUblInvoice, writeUbl } from '../helpers/ubl-builder.ts';
+import { createEmptyDatabase, dropDatabase } from '../../src/infrastructure/database/admin.ts';
+import { createDatabase, runMigrations } from '../../src/infrastructure/database/connection.ts';
+import type { Db } from '../../src/infrastructure/database/connection.ts';
 import { acquireLock } from '../../src/infrastructure/runtime/lock.ts';
 import { makeTempDir } from '../helpers/context.ts';
-import { resetDatabase, workerDatabase, workerDatabaseEnv } from '../helpers/db.ts';
+import { requireServer, workerDatabaseEnv, workerDatabaseName } from '../helpers/db.ts';
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src/cli/bin.ts');
 const workDir = makeTempDir('invoicebot-e2e-run-');
-afterAll(() => fs.rmSync(workDir, { recursive: true, force: true }));
 
-// La CLI usa la base de SQL Server de este proceso de pruebas, vacía al empezar.
+// Base propia, recién creada: `run` decide si toca una copia según el
+// historial de copias de la base, y las de otras pruebas del mismo proceso
+// (hechas sobre la base compartida) no deben contar.
+const DB_NAME = `${workerDatabaseName()}_run`;
+let db: Db;
 beforeAll(async () => {
-  await resetDatabase(await workerDatabase());
+  const server = requireServer();
+  await createEmptyDatabase(server, DB_NAME, { replace: true });
+  db = createDatabase({ ...server, database: DB_NAME });
+  await runMigrations(db);
+});
+afterAll(async () => {
+  await db?.destroy();
+  await dropDatabase(requireServer(), DB_NAME);
+  fs.rmSync(workDir, { recursive: true, force: true });
 });
 
 const baseEnv = {
   ...process.env,
   ...workerDatabaseEnv(),
+  INVOICEBOT_DB_NAME: DB_NAME,
   INVOICEBOT_AI_PROVIDER: 'mock',
   INVOICEBOT_LOG_LEVEL: 'silent',
   INVOICEBOT_LOG_DIR: './logs',
@@ -76,7 +91,7 @@ describe('ejecución desatendida desde la CLI', { timeout: 60_000 }, () => {
 
   it('omite el ciclo sin error si ya hay otra ejecución en curso', async () => {
     // Otra instancia (aquí, este proceso) tiene el candado en SQL Server.
-    const release = await acquireLock(await workerDatabase());
+    const release = await acquireLock(db);
     try {
       const { code, stdout } = cli({ INVOICEBOT_INBOX_DIR: './bandeja' }, 'run');
       expect(code).toBe(0);

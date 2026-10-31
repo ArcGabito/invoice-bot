@@ -27,13 +27,16 @@ async function setup({
   opened.push(ctx);
   const inbox = path.join(ctx.dir, 'bandeja');
   fs.mkdirSync(path.join(inbox, 'proveedor-a'), { recursive: true });
-  // La base de pruebas se reutiliza entre archivos: la copia "del día" es la
-  // hecha durante esta prueba (isBackupDue se prueba en runtime.test.ts).
-  // msdb guarda la hora al segundo.
-  const since = new Date(Math.floor(Date.now() / 1000) * 1000);
+  // La base de pruebas se reutiliza entre archivos y msdb guarda la hora al
+  // segundo: la copia "del día" es la hecha durante esta prueba, no la de una
+  // prueba anterior del mismo segundo (isBackupDue se prueba en runtime.test.ts).
+  let made = false;
   const backup = {
-    isDue: async () => !(await listBackups(ctx.db)).some((b) => b.createdAt >= since),
-    create: () => createBackup(ctx.db, ctx.deps.config.backup.dir, { retention: 3 }),
+    isDue: async () => !made,
+    create: async () => {
+      made = true;
+      return createBackup(ctx.db, ctx.deps.config.backup.dir, { retention: 3 });
+    },
   };
   return { ...ctx, inbox, backup };
 }
