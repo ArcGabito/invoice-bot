@@ -37,6 +37,8 @@ export const EXPORT_COLUMNS = Object.freeze([
   { key: 'data_source', label: 'Origen', type: 'text', width: 8 },
   { key: 'sunat_status', label: 'Estado SUNAT', type: 'text', width: 14 },
   { key: 'prepaid_amount', label: 'Anticipos', type: 'amount' },
+  { key: 'supplier_tax_id', label: 'ID fiscal emisor (exterior)', type: 'text', width: 16 },
+  { key: 'supplier_country', label: 'País emisor', type: 'text', width: 8 },
 ]);
 
 /** Valor de una columna para una fila de la consulta de exportación. */

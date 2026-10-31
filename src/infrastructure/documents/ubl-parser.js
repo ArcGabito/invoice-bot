@@ -160,6 +160,8 @@ export function parseUbl(buffer) {
     is_invoice: true,
     supplier_name: supplier.name,
     supplier_ruc: supplier.id,
+    supplier_tax_id: null,
+    supplier_country: 'PE',
     customer_name: customer.name,
     customer_ruc: customer.id,
     document_type: documentType,

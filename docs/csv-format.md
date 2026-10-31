@@ -15,7 +15,7 @@ Las columnas, su orden y sus nombres son estables dentro de una versión mayor. 
 | `supplier_name` | texto | Razón social del emisor. |
 | `customer_ruc` | 11 u 8 dígitos o vacío | RUC o DNI del cliente. |
 | `customer_name` | texto | Nombre del cliente. |
-| `document_type` | 2 dígitos | Catálogo 01 de SUNAT: `01` factura, `03` boleta, `07` nota de crédito, `08` nota de débito. |
+| `document_type` | 2 dígitos | Catálogo 01 de SUNAT: `01` factura, `03` boleta, `07` nota de crédito, `08` nota de débito; `91` comprobante de un proveedor del exterior (sin serie, con `number` tal como aparece, p. ej. `IN-12345678`). |
 | `series` | texto | Serie (`F001`, `B001`, `E001`, `0001`). |
 | `number` | dígitos | Correlativo, tal como aparece en el comprobante. |
 | `currency` | ISO 4217 | `PEN`, `USD`… |
@@ -37,6 +37,8 @@ Las columnas, su orden y sus nombres son estables dentro de una versión mayor. 
 | `data_source` | `xml`, `ai` | Origen de los datos: el XML del comprobante electrónico (exacto) o la extracción con IA desde el PDF (propuesta, validada). Añadida en v0.2.0. |
 | `sunat_status` | texto o vacío | Último estado del comprobante según la consulta de validez de SUNAT: `ACEPTADO`, `AUTORIZADO`, `ANULADO`, `NO EXISTE` o `NO AUTORIZADO`. Vacío si no se ha consultado (`invoicebot verify-sunat`). Añadida en v0.2.0. |
 | `prepaid_amount` | decimal | Anticipos ya pagados y deducidos del total de este comprobante. Añadida en v0.2.0. |
+| `supplier_tax_id` | texto o vacío | Identificador fiscal de un proveedor del exterior (EIN, VAT ID…). Añadida en v0.2.0. |
+| `supplier_country` | ISO 3166 o vacío | País del proveedor (`PE` en comprobantes electrónicos XML). Añadida en v0.2.0. |
 
 **Importes**: punto como separador decimal, dos decimales, sin separador de miles ni símbolo de moneda (`1234.50`). Un campo vacío significa que el dato no aparece en el comprobante; no equivale a cero.
 

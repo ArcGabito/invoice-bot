@@ -4,6 +4,7 @@ import {
   DOCUMENT_STATUS,
   SEVERITY,
   SKIP_REASON,
+  hasInvoiceData,
   normalizeInvoice,
 } from '../../domain/invoice.js';
 import {
@@ -103,7 +104,9 @@ export async function processDocument({ document, filePath, deps }) {
     if (ai.error) return fail(ai.error.kind, ai.error.message);
     ({ data, runId } = ai);
     dataSource = DATA_SOURCE.AI;
-    if (!data.is_invoice) {
+    // La IA propone y el código decide: si el modelo duda pero entregó los
+    // datos de un comprobante completo, se procesa y queda para revisión.
+    if (!data.is_invoice && !hasInvoiceData(data)) {
       return fail('not_invoice', 'El modelo indica que el documento no es un comprobante de pago');
     }
   }
@@ -115,6 +118,16 @@ export async function processDocument({ document, filePath, deps }) {
     today,
   });
   const issues = [...validation.issues];
+  if (dataSource === DATA_SOURCE.AI && !data.is_invoice) {
+    issues.push({
+      rule_code: 'MODEL_DOUBTED_INVOICE',
+      severity: SEVERITY.WARNING,
+      message:
+        'El modelo no reconoció el documento como comprobante, pero extrajo tipo, número, emisor y total: confirma que lo sea',
+      expected_value: null,
+      actual_value: null,
+    });
+  }
 
   const key = businessKey(invoice);
   const matches = key ? repository.findByBusinessKey(key, document.id) : [];

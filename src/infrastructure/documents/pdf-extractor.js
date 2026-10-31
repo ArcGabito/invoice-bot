@@ -42,24 +42,66 @@ export async function extractPdfText(filePath) {
   }
 }
 
-function joinTextItems(items) {
+/**
+ * Glifos sin equivalente Unicode. Algunos generadores de PDF (p. ej. las
+ * facturas hechas con Stripe, como las de Cloudflare) no declaran el texto de
+ * guiones ni paréntesis, y pdf.js los entrega como U+0000: "IN-45946823"
+ * llegaba como "IN \u0000 45946823". Entre dos letras o dígitos casi siempre
+ * es un guion (números de factura, EIN, rangos de fechas); en cualquier otra
+ * posición se descarta, porque no se puede saber qué carácter era.
+ */
+function resolveUnmappedGlyphs(line) {
+  /* eslint-disable no-control-regex -- U+0000 es justo el carácter que hay que tratar */
+  return line
+    .replace(/(?<=[\p{L}\p{N}])\u0000+(?=[\p{L}\p{N}])/gu, '-')
+    .replace(/\u0000/g, ' ')
+    .replace(/ {2,}/g, ' ');
+  /* eslint-enable no-control-regex */
+}
+
+/**
+ * Une los fragmentos de texto en líneas. Dentro de una línea, dos fragmentos
+ * se separan con un espacio solo si en la página hay un hueco entre ellos:
+ * pdf.js corta el texto en trozos que a menudo van pegados ("IN", "-", "4594…").
+ */
+export function joinTextItems(items) {
   const lines = [];
-  let current = [];
+  let line = '';
   let lastY = null;
+  let lastEndX = null;
+  let pendingSpace = false;
+
+  const endLine = () => {
+    const resolved = resolveUnmappedGlyphs(line).trim();
+    if (resolved !== '') lines.push(resolved);
+    line = '';
+    lastEndX = null;
+    pendingSpace = false;
+  };
+
   for (const item of items) {
     if (typeof item.str !== 'string') continue;
-    const y = item.transform?.[5];
-    if (lastY !== null && y !== undefined && Math.abs(y - lastY) > 2) {
-      lines.push(current.join(' '));
-      current = [];
-    }
-    if (item.str.trim() !== '') current.push(item.str.trim());
-    if (item.hasEOL) {
-      lines.push(current.join(' '));
-      current = [];
-    }
+    const [scaleX = 0, skewY = 0, , , x, y] = item.transform ?? [];
+    if (lastY !== null && y !== undefined && Math.abs(y - lastY) > 2) endLine();
     if (y !== undefined) lastY = y;
+
+    const text = item.str;
+    if (text.trim() === '') {
+      if (line !== '') pendingSpace = true;
+    } else {
+      if (line !== '') {
+        const fontSize = Math.hypot(scaleX, skewY) || item.height || 10;
+        const gap = x !== undefined && lastEndX !== null ? x - lastEndX : null;
+        const separated = gap === null || Math.abs(gap) > fontSize * 0.15;
+        if (pendingSpace || separated) line += ' ';
+      }
+      line += pendingSpace || line === '' ? text.trimStart() : text;
+      pendingSpace = /\s$/.test(text);
+      line = line.trimEnd();
+      if (x !== undefined && typeof item.width === 'number') lastEndX = x + item.width;
+    }
+    if (item.hasEOL) endLine();
   }
-  if (current.length) lines.push(current.join(' '));
-  return lines.filter((l) => l.trim() !== '').join('\n');
+  endLine();
+  return lines.join('\n');
 }

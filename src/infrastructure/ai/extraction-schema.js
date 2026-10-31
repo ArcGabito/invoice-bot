@@ -23,11 +23,17 @@ export const ExtractionSchema = z.object({
       'true si el documento es un comprobante de pago (factura, boleta, nota de crédito/débito, ticket, recibo)',
     ),
   supplier_name: nullableText('Razón social o nombre del emisor'),
-  supplier_ruc: nullableText('RUC del emisor, 11 dígitos sin espacios'),
+  supplier_ruc: nullableText(
+    'RUC del emisor, 11 dígitos sin espacios. null si el emisor es del extranjero',
+  ),
+  supplier_tax_id: nullableText(
+    'Identificador fiscal de un emisor del extranjero tal como aparece (EIN, VAT ID…). null si no aparece o si el emisor es peruano',
+  ),
+  supplier_country: nullableText('País del emisor, código ISO de dos letras (PE, US, IE…)'),
   customer_name: nullableText('Razón social o nombre del cliente/adquiriente'),
   customer_ruc: nullableText('RUC (11 dígitos) o DNI (8 dígitos) del cliente'),
   document_type: nullableText(
-    'Código SUNAT del tipo de comprobante: 01 factura, 03 boleta, 07 nota de crédito, 08 nota de débito, 12 ticket, 14 recibo de servicios públicos',
+    'Código SUNAT del tipo de comprobante: 01 factura, 03 boleta, 07 nota de crédito, 08 nota de débito, 12 ticket, 14 recibo de servicios públicos, 91 factura de un proveedor del extranjero',
   ),
   series: nullableText('Serie del comprobante, p. ej. F001, B001, E001 o 0001'),
   number: nullableText('Número correlativo tal como aparece, p. ej. 00001234'),

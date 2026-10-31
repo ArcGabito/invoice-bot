@@ -26,6 +26,7 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 | Ejecución desatendida (`run`), tarea programada de Windows, historial de ejecuciones | ✅ |
 | Copias de seguridad verificadas con retención y logs diarios en archivo | ✅ |
 | Facturas con anticipos | ✅ |
+| Facturas de proveedores del extranjero (no domiciliados, tipo 91): AWS, Google, Cloudflare… | ✅ |
 | OCR para PDFs escaneados e imágenes | ⏳ v0.2.0 — hoy quedan en estado `needs_ocr` |
 | Revisión manual interactiva y resolución de incidencias | ⏳ v0.3.0 |
 
@@ -157,6 +158,8 @@ scan → descubrir archivos → SHA-256 → ¿ya procesado? → sí: omitir
 ```
 
 - **XML primero**: los comprobantes electrónicos traen un XML firmado (UBL 2.1) con los datos exactos. InvoiceBot lo lee sin IA —gratis y sin errores de interpretación— y reparte los importes según el catálogo de tributos de SUNAT (gravadas, exoneradas, inafectas, exportación, ISC, ICBPER). El PDF con el mismo nombre en la misma carpeta se vincula al XML y no se envía a la IA. La constancia de recepción (CDR, `R-*.xml`) se reconoce y se omite. La IA queda para lo que no tiene XML: facturas físicas, tickets y documentos del extranjero. La firma digital del XML todavía no se verifica.
+- **Proveedores del extranjero**: facturas de servicios digitales (AWS, Google, Microsoft, Cloudflare…) se registran como tipo 91 (comprobante de no domiciliado) con el identificador fiscal y el país del proveedor, sin exigir RUC, serie SUNAT ni IGV, y con una nota para revisar con el contador el IGV por utilización de servicios y la retención del impuesto a la renta. No se consultan en SUNAT. Probado con 13 facturas reales de Cloudflare: número, fecha, moneda, subtotal, total y emisor correctos en todas.
+- **La IA propone, el código decide**: si el modelo dice que un documento no es un comprobante pero extrajo tipo, número, emisor y total, se procesa igual con una advertencia para que una persona lo confirme (caso real: una boleta electrónica bien leída pero marcada como "no comprobante").
 - **Idempotencia**: cada archivo se identifica por su SHA-256. Ejecutar dos veces el mismo comando no duplica registros ni repite llamadas a la IA.
 - **Concurrencia limitada**: `INVOICEBOT_CONCURRENCY` documentos a la vez (2 por defecto).
 - **Reintentos controlados**: un JSON inválido se repite una vez en el momento; los errores de red se reintentan con `retry --failed`; un rechazo del modelo, un documento que no es comprobante o un PDF dañado no se reintentan salvo con `--force`.
@@ -177,6 +180,8 @@ Las incidencias se guardan individualmente en `validation_issues`. Una factura c
 | IGV que no corresponde al 18 % ni al 10,5 % de la base gravada | advertencia |
 | Fecha futura, serie con formato no SUNAT o de otro tipo de comprobante, RUC del cliente inválido | advertencia |
 | Posible duplicado de otro documento | advertencia |
+| Comprobante del exterior (tipo 91) con IGV o con RUC peruano | advertencia |
+| El modelo dudó si era un comprobante, pero los datos están completos | advertencia |
 
 El IGV no se calcula sobre todo el subtotal cuando hay operaciones exoneradas o inafectas: se usa el desglose tributario del comprobante. La aritmética se hace con enteros en céntimos y una tolerancia explícita (`INVOICEBOT_AMOUNT_TOLERANCE`, 0.02 por defecto).
 

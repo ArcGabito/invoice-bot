@@ -1,9 +1,15 @@
 import { applyRateBasisPoints, formatCents, sumCents } from '../shared/money.js';
-import { DOCUMENT_TYPES, SEVERITY, VALIDATION_STATUS, AMOUNT_FIELDS } from './invoice.js';
+import {
+  AMOUNT_FIELDS,
+  DOCUMENT_TYPES,
+  FOREIGN_DOCUMENT_TYPE,
+  SEVERITY,
+  VALIDATION_STATUS,
+} from './invoice.js';
 import { validateRuc } from './ruc-validator.js';
 
 /** Versión de las reglas. Se guarda con cada factura para poder auditar resultados. */
-export const VALIDATION_RULES_VERSION = '2026.10.1';
+export const VALIDATION_RULES_VERSION = '2026.10.2';
 
 /**
  * Tasas de IGV admitidas, en puntos básicos: 18 % general (16 % IGV + 2 % IPM)
@@ -21,6 +27,16 @@ const REQUIRED_FIELDS = [
   'currency',
   'total_cents',
 ];
+/** Un proveedor del exterior no tiene RUC ni serie SUNAT: se identifica por su nombre o su identificador fiscal. */
+const FOREIGN_REQUIRED_FIELDS = [
+  'document_type',
+  'number',
+  'issue_date',
+  'currency',
+  'total_cents',
+];
+
+const isForeign = (invoice) => invoice.document_type === FOREIGN_DOCUMENT_TYPE;
 
 function issue(rule_code, severity, message, { expected = null, actual = null } = {}) {
   return {
@@ -40,24 +56,47 @@ function isCalendarDate(text) {
 }
 
 function checkRequired(invoice) {
-  return REQUIRED_FIELDS.filter(
-    (field) => invoice[field] === null || invoice[field] === undefined,
-  ).map((field) =>
-    issue(
-      'REQUIRED_FIELD_MISSING',
-      SEVERITY.ERROR,
-      `Falta el campo obligatorio ${field.replace(/_cents$/, '')}`,
-      {
-        actual: 'null',
-      },
-    ),
-  );
+  const fields = isForeign(invoice) ? FOREIGN_REQUIRED_FIELDS : REQUIRED_FIELDS;
+  const issues = fields
+    .filter((field) => invoice[field] === null || invoice[field] === undefined)
+    .map((field) =>
+      issue(
+        'REQUIRED_FIELD_MISSING',
+        SEVERITY.ERROR,
+        `Falta el campo obligatorio ${field.replace(/_cents$/, '')}`,
+        {
+          actual: 'null',
+        },
+      ),
+    );
+  if (isForeign(invoice) && !invoice.supplier_name && !invoice.supplier_tax_id) {
+    issues.push(
+      issue(
+        'REQUIRED_FIELD_MISSING',
+        SEVERITY.ERROR,
+        'Falta identificar al proveedor del exterior (nombre o identificador fiscal)',
+        { actual: 'null' },
+      ),
+    );
+  }
+  return issues;
 }
 
 function checkRucs(invoice) {
   const issues = [];
+  if (isForeign(invoice) && invoice.supplier_ruc) {
+    // Un emisor con RUC es peruano: probablemente el tipo de comprobante está mal.
+    issues.push(
+      issue(
+        'FOREIGN_WITH_RUC',
+        SEVERITY.WARNING,
+        'El comprobante figura como del exterior pero el emisor tiene RUC peruano',
+        { actual: invoice.supplier_ruc },
+      ),
+    );
+  }
   const checks = [
-    ['supplier_ruc', 'SUPPLIER_RUC', SEVERITY.ERROR, 'emisor'],
+    ...(isForeign(invoice) ? [] : [['supplier_ruc', 'SUPPLIER_RUC', SEVERITY.ERROR, 'emisor']]),
     ['customer_ruc', 'CUSTOMER_RUC', SEVERITY.WARNING, 'cliente'],
   ];
   for (const [field, prefix, severity, label] of checks) {
@@ -172,6 +211,37 @@ function checkIdentification(invoice) {
         { expected: Object.keys(DOCUMENT_TYPES).join(','), actual: document_type },
       ),
     );
+  }
+  if (isForeign(invoice)) {
+    issues.push(
+      issue(
+        'FOREIGN_SUPPLIER',
+        SEVERITY.INFO,
+        'Comprobante de un proveedor del exterior (no domiciliado): revisa con tu contador el IGV por utilización de servicios y la retención del impuesto a la renta',
+        { actual: [invoice.supplier_name, invoice.supplier_country].filter(Boolean).join(' · ') },
+      ),
+    );
+    if (number && !/^[A-Z0-9][A-Z0-9\-_/.]{0,39}$/i.test(number)) {
+      issues.push(
+        issue('NUMBER_FORMAT', SEVERITY.WARNING, 'Número de factura con caracteres inesperados', {
+          actual: number,
+        }),
+      );
+    }
+    if (currency && !/^[A-Z]{3}$/.test(currency)) {
+      issues.push(
+        issue(
+          'CURRENCY_INVALID',
+          SEVERITY.ERROR,
+          'La moneda debe ser un código ISO 4217 de 3 letras',
+          {
+            actual: currency,
+          },
+        ),
+      );
+    }
+    // Serie, correlativo SUNAT y monedas "peruanas" no aplican a un proveedor del exterior.
+    return issues;
   }
   if (series) {
     // Electrónica: letra + 3 alfanuméricos (F001, B001, E001). Física: 4 dígitos (0001).
@@ -337,6 +407,21 @@ function checkAmounts(invoice, normalizationIssues, toleranceCents, igvRatesBp) 
         ),
       );
     }
+  }
+
+  if (isForeign(invoice)) {
+    // Un proveedor del exterior no cobra IGV; su IVA o VAT va en otros tributos.
+    if (igv !== null && igv > 0) {
+      issues.push(
+        issue(
+          'IGV_ON_FOREIGN_INVOICE',
+          SEVERITY.WARNING,
+          'Un comprobante del exterior no debería traer IGV peruano (¿es VAT u otro impuesto?)',
+          { actual: formatCents(igv) },
+        ),
+      );
+    }
+    return issues;
   }
 
   // El IGV solo se aplica a la base gravada. Sin desglose, usar el subtotal es

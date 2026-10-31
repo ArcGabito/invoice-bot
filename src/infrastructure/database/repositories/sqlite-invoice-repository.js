@@ -5,6 +5,8 @@ import { SUNAT_RULE_PREFIX } from '../../../domain/sunat-status.js';
 const INVOICE_COLUMNS = [
   'supplier_name',
   'supplier_ruc',
+  'supplier_tax_id',
+  'supplier_country',
   'customer_name',
   'customer_ruc',
   'document_type',

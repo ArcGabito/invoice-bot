@@ -22,8 +22,14 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - Comando `backup`: copia con `VACUUM INTO`, verificada con `integrity_check`, y retención configurable (`INVOICEBOT_BACKUP_*`).
 - Logs en archivo, uno por día, con borrado tras `INVOICEBOT_LOG_RETENTION_DAYS` (`INVOICEBOT_LOG_DIR`).
 - Columna `prepaid_amount` (anticipos) en facturas, CSV y Excel. Migración 004.
+- Facturas de proveedores del extranjero: tipo 91 (no domiciliado), columnas `supplier_tax_id` y `supplier_country` (migración 005), validaciones propias (sin RUC, serie SUNAT ni IGV; nota informativa sobre sus obligaciones), duplicados por identificador fiscal o nombre y exclusión de la verificación en SUNAT. Probado con 13 facturas reales de Cloudflare.
+- Fechas con el mes en letras, en inglés o en español ("August 5, 2025", "5 de agosto de 2025"), y nombres de país convertidos a código ISO.
 
 ### Corregido
+
+- Lectura de PDF: los guiones sin texto Unicode (frecuentes en facturas generadas con Stripe) llegaban como U+0000 y el número `IN-45946823` se leía `IN   45946823`; ahora se recuperan entre letras o dígitos y se descartan en otras posiciones. Los fragmentos de texto se unen según su posición en la página, sin espacios donde no los hay.
+- Un comprobante con datos completos ya no se descarta solo porque el modelo responda `is_invoice=false`: se procesa con la advertencia `MODEL_DOUBTED_INVOICE` (caso real: una boleta electrónica bien leída).
+- Prompt `2026-10-31.1`: facturas del exterior, `$0.00` como "0.00" y no null, y nunca texto en campos de importe.
 
 - Las facturas con anticipos ya no dan un error falso de total: el XML trae `PrepaidAmount`, la IA lo extrae como `prepaid_amount` y la validación acepta el total con el anticipo descontado (o ya restado de la base, según el emisor).
 
