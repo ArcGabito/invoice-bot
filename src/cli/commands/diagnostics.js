@@ -101,7 +101,7 @@ export function registerDoctor(program, run) {
           'OCR',
           () => {
             throw new Error(
-              'no disponible en esta versión (planificado para v0.2.0); los documentos escaneados quedan en estado needs_ocr',
+              'no disponible en esta versión (planificado); los documentos escaneados quedan en estado needs_ocr',
             );
           },
           { optional: true },

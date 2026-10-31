@@ -1,6 +1,6 @@
 {
   "name": "invoicebot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Automatización local de facturas peruanas: extracción de texto, IA, validación contable y SQLite",
   "main": "src/cli/index.js",
   "scripts": {

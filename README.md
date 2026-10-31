@@ -8,7 +8,7 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 
 > El XML o el LLM proponen los datos; el código comprueba su consistencia; el usuario resuelve los casos dudosos.
 
-## Estado: v0.1.0 (+ XML en desarrollo para v0.2.0)
+## Estado: v0.2.0
 
 | Funcionalidad | Estado |
 | --- | --- |
@@ -27,7 +27,7 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 | Copias de seguridad verificadas con retención y logs diarios en archivo | ✅ |
 | Facturas con anticipos | ✅ |
 | Facturas de proveedores del extranjero (no domiciliados, tipo 91): AWS, Google, Cloudflare… | ✅ |
-| OCR para PDFs escaneados e imágenes | ⏳ v0.2.0 — hoy quedan en estado `needs_ocr` |
+| OCR para PDFs escaneados e imágenes | ⏳ próxima versión — hoy quedan en estado `needs_ocr` |
 | Revisión humana: pantalla web local y comandos para aprobar, rechazar y corregir, con auditoría | ✅ |
 
 ## Instalación
@@ -64,7 +64,7 @@ npm link
 ```text
 $ invoicebot scan ./facturas
 
-InvoiceBot v0.1.0
+InvoiceBot v0.2.0
 
 Documentos encontrados: 24
 Procesados correctamente: 19

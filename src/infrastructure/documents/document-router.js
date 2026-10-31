@@ -30,7 +30,7 @@ export class DocumentRouter {
       };
     }
     if (mimeType !== 'application/pdf') {
-      // Las imágenes siempre requieren OCR (disponible a partir de v0.2.0).
+      // Las imágenes siempre requieren OCR (planificado para una próxima versión).
       return { needsOcr: true, text: null, method: null, pageCount: null, chars: 0 };
     }
     const { text, pageCount } = await extractPdfText(filePath);

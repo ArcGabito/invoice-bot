@@ -7,7 +7,7 @@ export const DOCUMENT_STATUS = Object.freeze({
   PROCESSING: 'processing',
   EXTRACTED: 'extracted',
   FAILED: 'failed',
-  /** El documento no tiene texto suficiente; se procesará cuando haya OCR (v0.2.0). */
+  /** El documento no tiene texto suficiente; se procesará cuando haya OCR (planificado). */
   NEEDS_OCR: 'needs_ocr',
   /** No se procesa por diseño: representación impresa de un XML ya leído, CDR, etc. */
   SKIPPED: 'skipped',
