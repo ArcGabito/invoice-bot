@@ -6,11 +6,36 @@ on:
   pull_request:
 
 jobs:
+  # Pruebas completas contra un SQL Server real (contenedor de servicio).
+  # Los runners de Windows no admiten contenedores de servicio: allí solo se
+  # ejecutan las pruebas que no usan la base de datos (job windows).
   test:
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    env:
+      # Contraseña de un servidor efímero que solo existe durante este job.
+      SA_PASSWORD: Ci-InvoiceBot-2026!sa
+      INVOICEBOT_TEST_DB_SERVER: localhost
+      INVOICEBOT_TEST_DB_PORT: '1433'
+      INVOICEBOT_TEST_DB_USER: invoicebot_ci
+      INVOICEBOT_TEST_DB_PASSWORD: Ci-InvoiceBot-2026!app
+      INVOICEBOT_TEST_DB_TRUST_CERT: 'true'
+      # Falla en vez de saltarse las pruebas de integración si falta la conexión.
+      INVOICEBOT_TEST_DB_REQUIRED: 'true'
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: Ci-InvoiceBot-2026!sa
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -Q 'SELECT 1' -b -o /dev/null"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,4 +44,38 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      # Igual que scripts/dev/setup-local-sqlserver.ps1: las pruebas usan un
+      # inicio de sesión con el rol dbcreator, no sa, para detectar permisos que falten.
+      - name: Crear el inicio de sesión de pruebas
+        run: >-
+          docker exec ${{ job.services.sqlserver.id }}
+          /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$SA_PASSWORD" -b -Q
+          "CREATE LOGIN [$INVOICEBOT_TEST_DB_USER] WITH PASSWORD = N'$INVOICEBOT_TEST_DB_PASSWORD', CHECK_POLICY = ON;
+          ALTER SERVER ROLE [dbcreator] ADD MEMBER [$INVOICEBOT_TEST_DB_USER];"
       - run: npm test
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:unit
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construir la imagen
+        run: docker build -t invoicebot:ci .
+      - name: La imagen arranca
+        run: docker run --rm invoicebot:ci --version
+      - name: docker-compose.yml es válido
+        run: touch .env && MSSQL_SA_PASSWORD=x docker compose config --quiet

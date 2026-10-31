@@ -69,9 +69,9 @@ if ($Unregister) {
 if (-not $NodePath) {
   throw 'No se encontró node.exe en el PATH. Instala Node.js 24 LTS o indica -NodePath.'
 }
-$cli = Join-Path $ProjectDir 'bin\invoicebot.js'
+$cli = Join-Path $ProjectDir 'dist\cli\bin.js'
 if (-not (Test-Path $cli)) {
-  throw "No se encontró $cli. Indica la carpeta del proyecto con -ProjectDir."
+  throw "No se encontró $cli. Compila el proyecto con 'npm run build', o indica la carpeta del proyecto con -ProjectDir."
 }
 $envFile = Join-Path $ProjectDir '.env'
 function Test-EnvSetting([string]$Name) {

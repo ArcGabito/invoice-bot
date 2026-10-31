@@ -1,0 +1,9 @@
+{
+  // Comprobación estricta del código y los scripts, sin generar archivos.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src", "scripts", "vitest.config.ts"]
+}

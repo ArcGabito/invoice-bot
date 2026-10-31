@@ -38,3 +38,12 @@ obj/
 
 # Configuración local de herramientas
 /.claude/
+
+# Compilación de TypeScript
+/dist/
+
+# Certificados y copias de la base de datos
+/tls/
+*.pfx
+*.key
+*.bak

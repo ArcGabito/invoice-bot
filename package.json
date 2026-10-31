@@ -1,15 +1,18 @@
 {
   "name": "invoicebot",
-  "version": "0.4.0",
-  "description": "Automatización local de facturas peruanas: extracción de texto, IA, validación contable y SQLite",
-  "main": "src/cli/index.js",
+  "version": "0.5.0",
+  "description": "Bot RPA de facturas peruanas: XML UBL, PDF, OCR e IA, validación contable, SUNAT y SQL Server",
+  "main": "dist/cli/index.js",
   "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.check.json && tsc -p tsconfig.tests.json",
+    "start": "node src/cli/bin.ts",
     "test": "vitest run",
-    "start": "node bin/invoicebot.js",
+    "test:unit": "vitest run tests/unit",
     "test:watch": "vitest",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "samples": "node scripts/generate-sample-invoices.js"
+    "samples": "node scripts/generate-sample-invoices.ts"
   },
   "author": "",
   "license": "MIT",
@@ -21,10 +24,12 @@
     "globals": "^17.13.0",
     "prettier": "^3.9.10",
     "read-excel-file": "^9.3.14",
+    "typescript": "~6.0",
+    "typescript-eslint": "^8.72.1",
     "vitest": "^5.0.5"
   },
   "bin": {
-    "invoicebot": "bin/invoicebot.js"
+    "invoicebot": "dist/cli/bin.js"
   },
   "engines": {
     "node": ">=24"
@@ -34,19 +39,20 @@
     "@napi-rs/canvas": "1.0.11",
     "@tesseract.js-data/eng": "^1.0.0",
     "@tesseract.js-data/spa": "^1.0.0",
-    "better-sqlite3": "^13.0.3",
     "commander": "^15.0.0",
     "csv-stringify": "^6.9.0",
     "dotenv": "^18.0.9",
     "fast-xml-parser": "^5.11.2",
+    "kysely": "^0.29.7",
     "pdfjs-dist": "^6.4.299",
     "pino": "^10.4.0",
+    "tarn": "^3.1.2",
+    "tedious": "^20.3.8",
     "tesseract.js": "^7.0.0",
     "write-excel-file": "^4.1.1",
     "zod": "^4.6.7"
   },
   "files": [
-    "bin",
-    "src"
+    "dist"
   ]
 }

@@ -6,7 +6,7 @@
       "request": "launch",
       "name": "invoicebot scan (mock)",
       "skipFiles": ["<node_internals>/**"],
-      "program": "${workspaceFolder}/bin/invoicebot.js",
+      "program": "${workspaceFolder}/src/cli/bin.ts",
       "args": ["--provider", "mock", "scan", "./facturas"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal"
@@ -16,7 +16,7 @@
       "request": "launch",
       "name": "invoicebot doctor",
       "skipFiles": ["<node_internals>/**"],
-      "program": "${workspaceFolder}/bin/invoicebot.js",
+      "program": "${workspaceFolder}/src/cli/bin.ts",
       "args": ["doctor"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal"

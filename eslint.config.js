@@ -1,9 +1,11 @@
 import js from '@eslint/js';
 import globals from 'globals';
+import tseslint from 'typescript-eslint';
 
-export default [
-  { ignores: ['node_modules/', 'data/', 'exports/', 'coverage/'] },
+export default tseslint.config(
+  { ignores: ['node_modules/', 'dist/', 'data/', 'exports/', 'coverage/'] },
   js.configs.recommended,
+  ...tseslint.configs.recommended,
   {
     languageOptions: {
       ecmaVersion: 'latest',
@@ -11,7 +13,16 @@ export default [
       globals: { ...globals.node },
     },
     rules: {
-      'no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
+      ],
+      '@typescript-eslint/consistent-type-imports': 'error',
     },
   },
-];
+  {
+    // Los dobles de prueba (fetch, clientes de API) imitan solo lo que se usa.
+    files: ['tests/**'],
+    rules: { '@typescript-eslint/no-explicit-any': 'off' },
+  },
+);

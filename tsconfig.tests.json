@@ -1,0 +1,10 @@
+{
+  // Pruebas: el código de producción se comprueba con tsconfig.check.json;
+  // aquí se permiten parámetros sin tipo en los datos y ayudantes de prueba.
+  // strictNullChecks se mantiene: Kysely lo necesita para inferir los tipos.
+  "extends": "./tsconfig.check.json",
+  "compilerOptions": {
+    "noImplicitAny": false
+  },
+  "include": ["src", "scripts", "tests", "vitest.config.ts"]
+}

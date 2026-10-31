@@ -1,0 +1,26 @@
+{
+  // Node 24 ejecuta los .ts directamente (eliminando los tipos), así que el
+  // código solo usa sintaxis "borrable": sin enums, namespaces ni propiedades
+  // en el constructor. `npm run build` compila a dist/ para producción.
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "sourceMap": true,
+    "newLine": "lf"
+  },
+  "include": ["src"]
+}

@@ -2,6 +2,40 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
 
+## [0.5.0] - 2026-10-31
+
+### Cambios incompatibles
+
+- **La base de datos pasa de SQLite a SQL Server** (2019 o posterior; Express sirve). El bot y la pantalla de revisión pueden correr en equipos o contenedores distintos con la misma base de datos. Los datos de `data/invoicebot.db` **no se importan**: crea la base de datos con `invoicebot db init` y vuelve a escanear la carpeta de entrada (ver la guía de instalación). Las revisiones hechas en la 0.4 no se trasladan.
+- El punto de entrada es `dist/cli/bin.js` (antes `bin/invoicebot.js`): la instalación de producción compila con `npm run build`. `npm start` sigue funcionando sin compilar.
+- Las copias de seguridad son archivos `.bak` de SQL Server y `INVOICEBOT_BACKUP_DIR` es una ruta **del servidor de SQL Server** (vacía: la carpeta de copias por defecto de la instancia).
+
+### Añadido
+
+- Conexión con SQL Server (`INVOICEBOT_DB_SERVER`, `_PORT`, `_NAME`, `_USER`, `_PASSWORD`, `_ENCRYPT`, `_TRUST_CERT`, `_POOL_MAX`), cifrada por defecto, con mensajes que explican cómo resolver los fallos de conexión y de inicio de sesión.
+- Comando `db`:
+  - `db init` crea la base de datos (con `READ_COMMITTED_SNAPSHOT`) y el inicio de sesión de la aplicación como `db_owner` solo de esa base, con una cuenta de administrador que se usa solo en ese comando (`INVOICEBOT_DB_ADMIN_USER` / `_PASSWORD`);
+  - `db migrate` aplica las migraciones pendientes, con copia previa;
+  - `db status` muestra la versión del esquema sin cambiar nada.
+- Copias con `BACKUP DATABASE … WITH COPY_ONLY, CHECKSUM`, comprobadas con `RESTORE VERIFYONLY`. `COPY_ONLY` no interfiere con las copias que TI tenga programadas. El archivo lleva el nombre de la base de datos (`invoicebot-AAAAMMDD-HHMMSS.bak` con el nombre por defecto), para que dos bases de la misma instancia no se pisen.
+- Docker: `Dockerfile` (Node 24, usuario sin privilegios) y `docker-compose.yml` con SQL Server 2022, el ciclo del bot (`run --watch`) y la pantalla de revisión (`serve`), con reinicio automático. Guía para TI en `docs/instalacion-linux.md`.
+- `scripts/dev/setup-local-sqlserver.ps1`: prepara un SQL Server instalado en Windows para desarrollar y ejecutar las pruebas (TCP, autenticación mixta, inicio de sesión `dbcreator` y `.env.test`).
+- CI: las pruebas de integración corren contra un SQL Server real en GitHub Actions, con un inicio de sesión `dbcreator`, no `sa`. Se construye la imagen de Docker y se valida `docker-compose.yml`.
+- Scripts `build`, `typecheck` y `test:unit`.
+
+### Cambiado
+
+- Todo el código y las pruebas pasan a TypeScript. Node 24 ejecuta los `.ts` directamente; `npm run build` compila a `dist/`.
+- El candado de una sola ejecución de `run` usa `sp_getapplock` en SQL Server, en lugar del archivo `data/invoicebot.lock`: vale aunque el bot corra en varias máquinas, y SQL Server lo libera si el proceso muere.
+- Las migraciones 001 a 007 de SQLite se sustituyen por un esquema inicial de SQL Server; cada migración se aplica en su propia transacción.
+- `INVOICEBOT_DATA_DIR` solo guarda datos locales (OCR).
+- La búsqueda de posibles duplicados y el guardado de la factura van en una misma transacción, con la clave de negocio reservada (`sp_getapplock`): dos copias del mismo comprobante procesadas a la vez, o por el bot y la pantalla de revisión, se detectan entre sí.
+- `scripts/windows/register-scheduled-task.ps1` y la guía de la VM Windows usan `dist\cli\bin.js` y explican la conexión con SQL Server.
+
+### Limitaciones conocidas
+
+- La retención de copias solo borra las antiguas si InvoiceBot ve la carpeta de copias en la misma ruta que SQL Server (mismo equipo, ruta UNC compartida o el volumen de Docker Compose). Ninguna prueba automática lo verifica.
+
 ## [0.4.0] - 2026-10-31
 
 ### Añadido
@@ -56,7 +90,7 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - Columna `sunat_status` en facturas y en el CSV.
 - `doctor` y `config` muestran la configuración de la API SUNAT (opcional).
 - Verificación en SUNAT configurable: `INVOICEBOT_SUNAT_ENABLED` (interruptor general, desactivado por defecto), `INVOICEBOT_SUNAT_VERIFY_ON_SCAN` (verificar al terminar `scan`; anulable con `scan --no-verify-sunat` o forzable con `--verify-sunat`), tiempo de espera, pausa entre consultas y URLs propias para proxy o entorno de pruebas.
-- Exportación a Excel (`export --xlsx` o `--format xlsx`, por defecto con `INVOICEBOT_EXPORT_FORMAT`): hoja *Facturas* con importes numéricos, fechas reales y RUC/serie/número como texto, y hoja *Resumen* por moneda y estado. Usa `write-excel-file` (mantenido, una sola dependencia, sin vulnerabilidades conocidas).
+- Exportación a Excel (`export --xlsx` o `--format xlsx`, por defecto con `INVOICEBOT_EXPORT_FORMAT`): hoja _Facturas_ con importes numéricos, fechas reales y RUC/serie/número como texto, y hoja _Resumen_ por moneda y estado. Usa `write-excel-file` (mantenido, una sola dependencia, sin vulnerabilidades conocidas).
 - Comando `run`: ciclo desatendido que reintenta fallos temporales, escanea `INVOICEBOT_INBOX_DIR`, verifica en SUNAT si está configurado, exporta el mes actual y el anterior (`INVOICEBOT_RUN_EXPORT`) y hace copia de seguridad cuando toca. `run --watch` lo repite cada `INVOICEBOT_RUN_INTERVAL_MINUTES`. Candado de una sola ejecución con recuperación de candados abandonados e historial en la tabla `bot_runs`, visible en `status`.
 - `scripts/windows/register-scheduled-task.ps1`: registra o elimina la tarea programada de Windows (`-WhatIf` para simular).
 - Comando `backup`: copia con `VACUUM INTO`, verificada con `integrity_check`, y retención configurable (`INVOICEBOT_BACKUP_*`).
