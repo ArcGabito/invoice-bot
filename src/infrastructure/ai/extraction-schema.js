@@ -44,7 +44,8 @@ export const ExtractionSchema = z.object({
   icbper: amount('Impuesto a las bolsas plásticas (ICBPER)'),
   other_charges: amount('Otros cargos'),
   other_taxes: amount('Otros tributos'),
-  total: amount('Importe total del comprobante'),
+  total: amount('Importe total a pagar del comprobante'),
+  prepaid_amount: amount('Anticipos ya pagados y deducidos del total'),
   notes: z
     .array(z.string())
     .describe(

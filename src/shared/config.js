@@ -48,11 +48,39 @@ const ConfigSchema = z.object({
   dataDir: z.string().min(1),
   dbPath: z.string().min(1),
   exportDir: z.string().min(1),
+  exportFormat: z.enum(['csv', 'xlsx']),
   concurrency: z.int().min(1).max(16),
   maxAttempts: z.int().min(1).max(10),
   minTextChars: z.int().min(0),
   amountToleranceCents: z.int().min(0),
   logLevel: z.enum(LOG_LEVELS),
+  /** Registros en archivo, uno por día. null = solo en pantalla (stderr). */
+  log: z.object({
+    dir: z.string().min(1).nullable(),
+    retentionDays: z.int().min(1).max(3650),
+  }),
+  backup: z.object({
+    dir: z.string().min(1),
+    /** Copias que se conservan; las más antiguas se borran. */
+    retention: z.int().min(1).max(1000),
+    /** `run` hace una copia si la última es más antigua que este intervalo. */
+    intervalHours: z
+      .int()
+      .min(1)
+      .max(24 * 30),
+  }),
+  /** Ejecución desatendida (`invoicebot run`). */
+  run: z.object({
+    /** Carpeta de entrada; puede ser una carpeta de OneDrive o SharePoint sincronizada. */
+    inboxDir: z.string().min(1).nullable(),
+    recursive: z.boolean({ error: 'usa true o false' }),
+    /** Exporta el mes actual y el anterior al terminar cada ejecución. */
+    export: z.enum(['none', 'csv', 'xlsx']),
+    intervalMinutes: z
+      .int()
+      .min(1)
+      .max(24 * 60),
+  }),
 });
 
 function intFrom(value, fallback) {
@@ -117,11 +145,27 @@ export function loadConfig({
     dataDir,
     dbPath: path.resolve(dataDir, overrides.dbFile ?? env.INVOICEBOT_DB_FILE ?? 'invoicebot.db'),
     exportDir: path.resolve(cwd, env.INVOICEBOT_EXPORT_DIR ?? './exports'),
+    exportFormat: (env.INVOICEBOT_EXPORT_FORMAT || 'csv').toLowerCase(),
     concurrency: intFrom(overrides.concurrency ?? env.INVOICEBOT_CONCURRENCY, 2),
     maxAttempts: intFrom(env.INVOICEBOT_MAX_ATTEMPTS, 3),
     minTextChars: intFrom(env.INVOICEBOT_MIN_TEXT_CHARS, 40),
     amountToleranceCents: Number.isFinite(toleranceCents) ? toleranceCents : Number.NaN,
     logLevel: env.INVOICEBOT_LOG_LEVEL || 'warn',
+    log: {
+      dir: env.INVOICEBOT_LOG_DIR ? path.resolve(cwd, env.INVOICEBOT_LOG_DIR) : null,
+      retentionDays: intFrom(env.INVOICEBOT_LOG_RETENTION_DAYS, 30),
+    },
+    backup: {
+      dir: path.resolve(cwd, env.INVOICEBOT_BACKUP_DIR || path.join(dataDir, 'backups')),
+      retention: intFrom(env.INVOICEBOT_BACKUP_RETENTION, 14),
+      intervalHours: intFrom(env.INVOICEBOT_BACKUP_INTERVAL_HOURS, 24),
+    },
+    run: {
+      inboxDir: env.INVOICEBOT_INBOX_DIR ? path.resolve(cwd, env.INVOICEBOT_INBOX_DIR) : null,
+      recursive: boolFrom(env.INVOICEBOT_INBOX_RECURSIVE, true),
+      export: (env.INVOICEBOT_RUN_EXPORT || 'none').toLowerCase(),
+      intervalMinutes: intFrom(env.INVOICEBOT_RUN_INTERVAL_MINUTES, 15),
+    },
   };
 
   const result = ConfigSchema.safeParse(raw);

@@ -408,6 +408,43 @@ export class SqliteInvoiceRepository {
       .all();
   }
 
+  // --- Ejecuciones desatendidas --------------------------------------------
+
+  startBotRun({ trigger, host, pid }) {
+    const info = this.db
+      .prepare(
+        `INSERT INTO bot_runs (trigger, status, host, pid, started_at) VALUES (?, 'running', ?, ?, ?)`,
+      )
+      .run(trigger, host, pid, now());
+    return Number(info.lastInsertRowid);
+  }
+
+  finishBotRun(runId, { status, exitCode, summary = null, errorMessage = null }) {
+    this.db
+      .prepare(
+        `UPDATE bot_runs SET status = ?, exit_code = ?, summary = ?, error_message = ?, finished_at = ?
+         WHERE id = ?`,
+      )
+      .run(status, exitCode, summary ? JSON.stringify(summary) : null, errorMessage, now(), runId);
+  }
+
+  /** Ejecuciones que quedaron "running" porque el proceso murió sin cerrarlas. */
+  closeAbandonedBotRuns() {
+    return this.db
+      .prepare(
+        `UPDATE bot_runs SET status = 'failed', error_message = 'La ejecución terminó de forma inesperada',
+           finished_at = ? WHERE status = 'running'`,
+      )
+      .run(now()).changes;
+  }
+
+  listBotRuns(limit = 10) {
+    return this.db
+      .prepare('SELECT * FROM bot_runs ORDER BY id DESC LIMIT ?')
+      .all(limit)
+      .map((r) => ({ ...r, summary: r.summary ? JSON.parse(r.summary) : null }));
+  }
+
   // --- SUNAT ---------------------------------------------------------------
 
   /**

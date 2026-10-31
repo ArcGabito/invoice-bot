@@ -155,9 +155,6 @@ export function parseUbl(buffer) {
     notes.push('Incluye operaciones gratuitas, que no forman parte del total.');
   if (schemes.includes(TAX_SCHEMES.IVAP))
     notes.push('Incluye IVAP (registrado en otros tributos).');
-  const prepaid = text(totals.PrepaidAmount);
-  if (prepaid && Number(prepaid) !== 0)
-    notes.push(`Tiene anticipos deducidos del total: ${prepaid}.`);
 
   const data = {
     is_invoice: true,
@@ -182,6 +179,7 @@ export function parseUbl(buffer) {
     other_charges: text(totals.ChargeTotalAmount),
     other_taxes: sumAmounts([tax(TAX_SCHEMES.OTHER), tax(TAX_SCHEMES.IVAP)]),
     total: text(totals.PayableAmount),
+    prepaid_amount: text(totals.PrepaidAmount),
     notes,
   };
   return { kind: 'invoice', data: ExtractionSchema.parse(data) };

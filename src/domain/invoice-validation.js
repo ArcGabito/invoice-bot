@@ -265,8 +265,10 @@ function checkAmounts(invoice, normalizationIssues, toleranceCents, igvRatesBp) 
     igv_cents: igv,
     total_cents: total,
   } = invoice;
+  // Anticipos ya pagados y aplicados a este comprobante: se restan del total a pagar.
+  const prepaid = invoice.prepaid_amount_cents ?? 0;
 
-  if (total === 0) {
+  if (total === 0 && prepaid === 0) {
     issues.push(
       issue('TOTAL_ZERO', SEVERITY.WARNING, 'El importe total es cero (¿operación gratuita?)'),
     );
@@ -283,7 +285,7 @@ function checkAmounts(invoice, normalizationIssues, toleranceCents, igvRatesBp) 
     invoice.other_taxes_cents,
   );
 
-  if (total !== null && total > 0) {
+  if (total !== null && (total > 0 || prepaid > 0)) {
     if (base === null) {
       issues.push(
         issue(
@@ -293,18 +295,23 @@ function checkAmounts(invoice, normalizationIssues, toleranceCents, igvRatesBp) 
         ),
       );
     } else {
-      const expected = base + charges;
-      const matches = Math.abs(total - expected) <= toleranceCents;
-      // Los descuentos globales que no afectan la base reducen el importe a pagar;
-      // los que sí la afectan ya vienen restados. Se aceptan ambas lecturas.
-      const matchesWithDiscount =
-        discount !== null && Math.abs(total - (expected - discount)) <= toleranceCents;
-      if (!matches && !matchesWithDiscount) {
+      const expected = base + charges - prepaid;
+      // Los descuentos globales y los anticipos pueden venir ya restados de la
+      // base o restarse después, según cómo los emita el proveedor. Se aceptan
+      // todas las lecturas coherentes antes de marcar el total como erróneo.
+      const discounts = discount === null ? [0] : [0, discount];
+      const prepaids = prepaid ? [prepaid, 0] : [0];
+      const fits = discounts.some((d) =>
+        prepaids.some((p) => Math.abs(total - (base + charges - d - p)) <= toleranceCents),
+      );
+      if (!fits) {
         issues.push(
           issue(
             'TOTAL_MISMATCH',
             SEVERITY.ERROR,
-            'El total no coincide con la base más los impuestos y cargos',
+            prepaid
+              ? 'El total no coincide con la base más los impuestos y cargos, menos los anticipos'
+              : 'El total no coincide con la base más los impuestos y cargos',
             {
               expected: formatCents(expected),
               actual: formatCents(total),

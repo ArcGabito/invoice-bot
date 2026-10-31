@@ -2,21 +2,24 @@ import path from 'node:path';
 import { VALIDATION_STATUS } from '../../domain/invoice.js';
 import { ConfigError } from '../../shared/errors.js';
 import { writeInvoicesCsv } from '../../infrastructure/exports/csv-exporter.js';
+import { writeInvoicesXlsx } from '../../infrastructure/exports/xlsx-exporter.js';
 
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+export const EXPORT_FORMATS = Object.freeze(['csv', 'xlsx']);
 
 /**
- * Caso de uso HU-05: exporta facturas a CSV.
+ * Caso de uso HU-05: exporta facturas a CSV o Excel (.xlsx).
  * Por defecto incluye solo facturas válidas o con advertencias y excluye las
  * repeticiones de un mismo comprobante (posibles duplicados).
  */
-export function exportInvoices({
+export async function exportInvoices({
   month = null,
   statuses = null,
   includeErrors = false,
   includeDuplicates = false,
   supplierRuc = null,
   currency = null,
+  format = 'csv',
   output = null,
   delimiter = ',',
   bom = false,
@@ -24,6 +27,11 @@ export function exportInvoices({
 }) {
   if (month !== null && !MONTH_PATTERN.test(month)) {
     throw new ConfigError(`El periodo debe tener el formato AAAA-MM (recibido: "${month}")`);
+  }
+  if (!EXPORT_FORMATS.includes(format)) {
+    throw new ConfigError(
+      `Formato de exportación desconocido: ${format} (usa ${EXPORT_FORMATS.join(' o ')})`,
+    );
   }
   const allowed = Object.values(VALIDATION_STATUS);
   let validationStatuses = statuses ?? [VALIDATION_STATUS.VALID, VALIDATION_STATUS.WARNING];
@@ -44,7 +52,11 @@ export function exportInvoices({
     includeDuplicates,
   });
   const outputPath = path.resolve(
-    output ?? path.join(deps.config.exportDir, `invoices-${month ?? 'all'}.csv`),
+    output ?? path.join(deps.config.exportDir, `invoices-${month ?? 'all'}.${format}`),
   );
+  if (format === 'xlsx') {
+    const title = `Facturas ${month ?? '(todos los periodos)'} · estados: ${validationStatuses.join(', ')}`;
+    return writeInvoicesXlsx(rows, outputPath, { title });
+  }
   return writeInvoicesCsv(rows, outputPath, { delimiter, bom });
 }

@@ -16,8 +16,16 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - Columna `sunat_status` en facturas y en el CSV.
 - `doctor` y `config` muestran la configuración de la API SUNAT (opcional).
 - Verificación en SUNAT configurable: `INVOICEBOT_SUNAT_ENABLED` (interruptor general, desactivado por defecto), `INVOICEBOT_SUNAT_VERIFY_ON_SCAN` (verificar al terminar `scan`; anulable con `scan --no-verify-sunat` o forzable con `--verify-sunat`), tiempo de espera, pausa entre consultas y URLs propias para proxy o entorno de pruebas.
+- Exportación a Excel (`export --xlsx` o `--format xlsx`, por defecto con `INVOICEBOT_EXPORT_FORMAT`): hoja *Facturas* con importes numéricos, fechas reales y RUC/serie/número como texto, y hoja *Resumen* por moneda y estado. Usa `write-excel-file` (mantenido, una sola dependencia, sin vulnerabilidades conocidas).
+- Comando `run`: ciclo desatendido que reintenta fallos temporales, escanea `INVOICEBOT_INBOX_DIR`, verifica en SUNAT si está configurado, exporta el mes actual y el anterior (`INVOICEBOT_RUN_EXPORT`) y hace copia de seguridad cuando toca. `run --watch` lo repite cada `INVOICEBOT_RUN_INTERVAL_MINUTES`. Candado de una sola ejecución con recuperación de candados abandonados e historial en la tabla `bot_runs`, visible en `status`.
+- `scripts/windows/register-scheduled-task.ps1`: registra o elimina la tarea programada de Windows (`-WhatIf` para simular).
+- Comando `backup`: copia con `VACUUM INTO`, verificada con `integrity_check`, y retención configurable (`INVOICEBOT_BACKUP_*`).
+- Logs en archivo, uno por día, con borrado tras `INVOICEBOT_LOG_RETENTION_DAYS` (`INVOICEBOT_LOG_DIR`).
+- Columna `prepaid_amount` (anticipos) en facturas, CSV y Excel. Migración 004.
 
 ### Corregido
+
+- Las facturas con anticipos ya no dan un error falso de total: el XML trae `PrepaidAmount`, la IA lo extrae como `prepaid_amount` y la validación acepta el total con el anticipo descontado (o ya restado de la base, según el emisor).
 
 - Ollama, tras probarlo con un modelo local real (`qwen3.5:4b`): los modelos con razonamiento tardaban más de 5 minutos y devolvían una respuesta vacía. Ahora se envía `think: false` (configurable con `INVOICEBOT_OLLAMA_THINK`), un contexto de 8192 tokens (`INVOICEBOT_OLLAMA_NUM_CTX`) y la respuesta se recibe en streaming, porque `fetch` de Node cortaba a los 5 minutos sin cabeceras. Resultado: unos 10 s por factura. Los mensajes de error explican si la respuesta quedó truncada o si el modelo solo razonó.
 - Prompt de extracción `2026-10-30.1`: indica explícitamente cómo separar serie y número y que el tipo de comprobante es un código de dos dígitos; el modelo pequeño confundía la serie con el tipo.

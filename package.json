@@ -20,6 +20,7 @@
     "eslint": "^10.13.0",
     "globals": "^17.13.0",
     "prettier": "^3.9.10",
+    "read-excel-file": "^9.3.14",
     "vitest": "^5.0.5"
   },
   "bin": {
@@ -37,6 +38,7 @@
     "fast-xml-parser": "^5.11.2",
     "pdfjs-dist": "^6.4.299",
     "pino": "^10.4.0",
+    "write-excel-file": "^4.1.1",
     "zod": "^4.6.7"
   },
   "files": [

@@ -20,7 +20,8 @@ export function registerStatus(program, run) {
     .action(() =>
       run(async (ctx, out) => {
         const s = ctx.repository.getStatusSummary();
-        out.data({ database: ctx.config.dbPath, ...s });
+        const lastRuns = ctx.repository.listBotRuns(5);
+        out.data({ database: ctx.config.dbPath, ...s, lastRuns });
         out.line(`Base de datos: ${ctx.config.dbPath}`);
         out.line();
         out.line('Documentos:');
@@ -36,6 +37,17 @@ export function registerStatus(program, run) {
         out.line(
           `Extracciones con IA: ${s.runs.total} (fallidas: ${s.runs.failed ?? 0}) · tokens entrada/salida: ${s.runs.input_tokens}/${s.runs.output_tokens}`,
         );
+        if (lastRuns.length) {
+          out.line();
+          out.line('Últimas ejecuciones del bot (invoicebot run):');
+          for (const r of lastRuns) {
+            const when = new Date(r.started_at).toLocaleString('es-PE');
+            const detail = r.summary
+              ? `${r.summary.found} documentos, ${r.summary.extracted} nuevos, ${r.summary.failed} fallidos`
+              : (r.error_message ?? '');
+            out.line(`  #${r.id} ${when} · ${r.trigger} · ${r.status} · ${detail}`);
+          }
+        }
         return EXIT_CODES.OK;
       }),
     );

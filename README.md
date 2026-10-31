@@ -22,7 +22,10 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 | Duplicados exactos (SHA-256) y posibles (emisor + tipo + serie + número) | ✅ |
 | Persistencia SQLite con migraciones, historial de intentos e incidencias | ✅ |
 | Reintentos y recuperación de ejecuciones interrumpidas | ✅ |
-| Exportación CSV con filtros | ✅ |
+| Exportación a CSV y Excel (.xlsx) con filtros | ✅ |
+| Ejecución desatendida (`run`), tarea programada de Windows, historial de ejecuciones | ✅ |
+| Copias de seguridad verificadas con retención y logs diarios en archivo | ✅ |
+| Facturas con anticipos | ✅ |
 | OCR para PDFs escaneados e imágenes | ⏳ v0.2.0 — hoy quedan en estado `needs_ocr` |
 | Revisión manual interactiva y resolución de incidencias | ⏳ v0.3.0 |
 
@@ -87,6 +90,9 @@ Base de datos: C:\...\invoice-bot\data\invoicebot.db
 | `invoicebot retry --failed` | Reintenta documentos fallidos (errores transitorios o salidas inválidas). |
 | `invoicebot retry --pending` | Recupera documentos de una ejecución interrumpida. |
 | `invoicebot verify-sunat` | Consulta en SUNAT si cada comprobante es válido y el estado del RUC emisor. |
+| `invoicebot run` | Ciclo desatendido: reintenta, escanea la carpeta de entrada, verifica, exporta y respalda. |
+| `invoicebot run --watch` | Repite el ciclo cada `INVOICEBOT_RUN_INTERVAL_MINUTES` hasta detenerlo. |
+| `invoicebot backup` | Copia verificada de la base de datos (`--list` para ver las existentes). |
 | `invoicebot doctor` | Comprueba Node.js, SQLite, lectura de PDF, OCR y conexión con la IA. |
 | `invoicebot config` | Muestra la configuración efectiva sin revelar secretos. |
 
@@ -95,10 +101,36 @@ Opciones globales: `--provider <anthropic|ollama|mock>`, `--data-dir <ruta>`, `-
 ### Exportación
 
 ```bash
+invoicebot export --month 2026-10 --xlsx
 invoicebot export --month 2026-10 --supplier 20100047218 --currency PEN --bom
 ```
 
-Por defecto se exportan las facturas **válidas y con advertencias**, y se excluyen las repeticiones de un mismo comprobante. Usa `--include-errors`, `--include-duplicates` o `--status valid` para cambiarlo, y `--bom --delimiter ";"` si vas a abrir el archivo en Excel con configuración regional en español. El formato de columnas está documentado en [docs/csv-format.md](docs/csv-format.md).
+Por defecto se exportan las facturas **válidas y con advertencias**, y se excluyen las repeticiones de un mismo comprobante. Usa `--include-errors`, `--include-duplicates` o `--status valid` para cambiarlo.
+
+- **Excel (`--xlsx`)**: hoja *Facturas* con importes numéricos (se pueden sumar), fechas reales y RUC/serie/número como texto (conservan los ceros), y hoja *Resumen* con totales por moneda y estado. Formato por defecto configurable con `INVOICEBOT_EXPORT_FORMAT`.
+- **CSV**: usa `--bom --delimiter ";"` si lo vas a abrir en Excel con configuración regional en español.
+
+Las columnas, comunes a ambos formatos, están documentadas en [docs/csv-format.md](docs/csv-format.md).
+
+### Ejecución desatendida (RPA)
+
+`invoicebot run` hace un ciclo completo sin intervención:
+
+1. Reintenta los documentos que fallaron antes por errores temporales (dentro de `INVOICEBOT_MAX_ATTEMPTS`).
+2. Escanea `INVOICEBOT_INBOX_DIR` (con subcarpetas). Puede ser una carpeta de **OneDrive o SharePoint sincronizada**, a la que los usuarios arrastran los comprobantes.
+3. Verifica en SUNAT si `INVOICEBOT_SUNAT_VERIFY_ON_SCAN=true`.
+4. Exporta el mes actual y el anterior si `INVOICEBOT_RUN_EXPORT=xlsx` o `csv` (las facturas de fin de mes llegan en los primeros días del siguiente). Con `INVOICEBOT_EXPORT_DIR` en una carpeta compartida, el equipo ve el Excel actualizado.
+5. Hace una copia de seguridad verificada si la última tiene más de `INVOICEBOT_BACKUP_INTERVAL_HOURS` (24 por defecto) y conserva las `INVOICEBOT_BACKUP_RETENTION` más recientes (14).
+
+Cada ciclo queda en la tabla `bot_runs` (`invoicebot status` muestra las últimas) y, con `INVOICEBOT_LOG_DIR`, en un log diario en JSON que se borra tras `INVOICEBOT_LOG_RETENTION_DAYS` (30). Un candado en `data/invoicebot.lock` impide dos ciclos a la vez: si la tarea programada coincide con un ciclo largo, el nuevo se omite con código 0. Un candado de un proceso que ya no existe se recupera solo.
+
+Para programarlo en Windows cada 15 minutos (con el usuario actual; usa `-WhatIf` para simular y `-Unregister` para quitarlo):
+
+```bash
+powershell -ExecutionPolicy Bypass -File scripts/windows/register-scheduled-task.ps1 -IntervalMinutes 15
+```
+
+Si prefieres un proceso que quede corriendo, usa `invoicebot run --watch`.
 
 ### Códigos de salida
 

@@ -95,3 +95,8 @@ export async function verifySunat({
   summary.durationMs = Date.now() - started;
   return summary;
 }
+
+/** Comprobantes anulados, no informados o no autorizados, o consultas fallidas. */
+export function hasSunatProblems(summary) {
+  return summary.failed + summary.voided + summary.notFound + summary.notAuthorized > 0;
+}

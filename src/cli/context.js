@@ -19,7 +19,11 @@ export function createContext(globalOptions = {}) {
       concurrency: globalOptions.concurrency,
     },
   });
-  const logger = createLogger({ level: globalOptions.verbose ? 'info' : config.logLevel });
+  const logger = createLogger({
+    level: globalOptions.verbose ? 'info' : config.logLevel,
+    fileDir: config.log.dir,
+    retentionDays: config.log.retentionDays,
+  });
   let db;
   let repository;
   let aiProvider;
@@ -29,7 +33,7 @@ export function createContext(globalOptions = {}) {
     config,
     logger,
     get db() {
-      db ??= openDatabase(config.dbPath);
+      db ??= openDatabase(config.dbPath, { backupDir: config.backup.dir });
       return db;
     },
     get repository() {

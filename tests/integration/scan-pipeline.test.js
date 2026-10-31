@@ -269,22 +269,27 @@ describe('exportInvoices', () => {
     );
     await scanInvoices({ root: inbox, deps });
 
-    const result = exportInvoices({ month: '2026-10', deps });
+    const result = await exportInvoices({ month: '2026-10', deps });
     const lines = fs.readFileSync(result.path, 'utf8').trim().split('\r\n');
     expect(result.rows).toBe(1);
     expect(lines[0]).toBe(
       'invoice_id,issue_date,due_date,supplier_ruc,supplier_name,customer_ruc,customer_name,document_type,series,number,currency,' +
         'subtotal,taxable_amount,exempt_amount,unaffected_amount,discount_amount,igv,isc,icbper,other_charges,other_taxes,total,' +
-        'validation_status,duplicate_count,file_name,sha256,data_source,sunat_status',
+        'validation_status,duplicate_count,file_name,sha256,data_source,sunat_status,prepaid_amount',
     );
     expect(lines[1]).toContain(',2026-10-15,,20100047218,PROVEEDOR DE EJEMPLO S.A.C.,20131312955,');
     expect(lines[1]).toContain(',01,F001,00001234,PEN,,100.00,,,,18.00,,,,,118.00,valid,1,a.pdf,');
 
-    expect(
-      exportInvoices({ month: '2026-10', includeErrors: true, includeDuplicates: true, deps }).rows,
-    ).toBe(3);
-    expect(exportInvoices({ month: '2026-09', deps }).rows).toBe(1);
-    expect(exportInvoices({ supplierRuc: '20999999999', deps }).rows).toBe(0);
-    expect(() => exportInvoices({ month: '10-2026', deps })).toThrow(/AAAA-MM/);
+    const all = await exportInvoices({
+      month: '2026-10',
+      includeErrors: true,
+      includeDuplicates: true,
+      deps,
+    });
+    expect(all.rows).toBe(3);
+    expect((await exportInvoices({ month: '2026-09', deps })).rows).toBe(1);
+    expect((await exportInvoices({ supplierRuc: '20999999999', deps })).rows).toBe(0);
+    await expect(exportInvoices({ month: '10-2026', deps })).rejects.toThrow(/AAAA-MM/);
+    await expect(exportInvoices({ format: 'pdf', deps })).rejects.toThrow(/csv o xlsx/);
   });
 });

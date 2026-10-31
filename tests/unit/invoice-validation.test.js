@@ -191,3 +191,28 @@ describe('businessKey', () => {
     ).toBeNull();
   });
 });
+
+describe('anticipos', () => {
+  it('acepta un total que ya descuenta los anticipos', () => {
+    // Base 100 + IGV 18 = 118; anticipo 50 ya pagado → a pagar 68.
+    const result = validate({ prepaid_amount: '50.00', total: '68.00' });
+    expect(result.issues).toEqual([]);
+  });
+
+  it('acepta también el anticipo restado de la base (según el emisor)', () => {
+    expect(validate({ prepaid_amount: '50.00', total: '118.00' }).status).toBe('valid');
+  });
+
+  it('un total cero por anticipo completo no es una operación gratuita', () => {
+    const result = validate({ prepaid_amount: '118.00', total: '0.00' });
+    expect(result.issues).toEqual([]);
+  });
+
+  it('sigue detectando totales incoherentes con anticipos', () => {
+    const result = validate({ prepaid_amount: '50.00', total: '60.00' });
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ rule_code: 'TOTAL_MISMATCH', expected_value: '68.00' }),
+    );
+    expect(result.issues[0].message).toMatch(/anticipos/);
+  });
+});

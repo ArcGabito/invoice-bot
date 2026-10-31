@@ -1,40 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { stringify } from 'csv-stringify/sync';
-import { AMOUNT_FIELDS } from '../../domain/invoice.js';
 import { formatCents } from '../../shared/money.js';
+import { EXPORT_COLUMNS, columnValue } from './columns.js';
 
-/**
- * Columnas del CSV contable. El orden y los nombres son parte del contrato
- * público (docs/csv-format.md): añade columnas al final, no las renombres.
- */
-export const CSV_COLUMNS = Object.freeze([
-  'invoice_id',
-  'issue_date',
-  'due_date',
-  'supplier_ruc',
-  'supplier_name',
-  'customer_ruc',
-  'customer_name',
-  'document_type',
-  'series',
-  'number',
-  'currency',
-  ...AMOUNT_FIELDS,
-  'validation_status',
-  'duplicate_count',
-  'file_name',
-  'sha256',
-  'data_source',
-  'sunat_status',
-]);
+/** Claves de las columnas del CSV, en orden (contrato en docs/csv-format.md). */
+export const CSV_COLUMNS = Object.freeze(EXPORT_COLUMNS.map((c) => c.key));
 
 export function invoiceToCsvRecord(row) {
   const record = {};
-  for (const column of CSV_COLUMNS) {
-    if (column === 'invoice_id') record[column] = row.id;
-    else if (AMOUNT_FIELDS.includes(column)) record[column] = formatCents(row[`${column}_cents`]);
-    else record[column] = row[column] ?? '';
+  for (const column of EXPORT_COLUMNS) {
+    const value = columnValue(row, column);
+    record[column.key] = column.type === 'amount' ? formatCents(value) : (value ?? '');
   }
   return record;
 }

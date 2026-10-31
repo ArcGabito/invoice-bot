@@ -1,7 +1,9 @@
 import { InvalidArgumentError } from 'commander';
-import { verifySunat } from '../../application/use-cases/verify-sunat.js';
+import { hasSunatProblems, verifySunat } from '../../application/use-cases/verify-sunat.js';
 import { EXIT_CODES } from '../../shared/errors.js';
 import { formatDuration } from '../output.js';
+
+export { hasSunatProblems };
 
 function parsePositiveInt(value) {
   const n = Number(value);
@@ -37,10 +39,6 @@ export function registerVerifySunat(program, run) {
 
 export const sunatProgress = (out) => (e) =>
   out.progress(`[${e.done}/${e.total}] ${e.invoice} → ${e.receiptStatus ?? `error: ${e.error}`}`);
-
-export function hasSunatProblems(summary) {
-  return summary.failed + summary.voided + summary.notFound + summary.notAuthorized > 0;
-}
 
 export function printSunatSummary(out, summary) {
   out.line(`Comprobantes por consultar: ${summary.candidates}`);

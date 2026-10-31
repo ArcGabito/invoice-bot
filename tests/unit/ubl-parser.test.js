@@ -146,3 +146,11 @@ describe('parseUbl', () => {
     expect(JSON.stringify(result)).not.toMatch(/fonts|extensions|\[/i);
   });
 });
+
+describe('parseUbl con anticipos', () => {
+  it('lee PrepaidAmount y la factura queda válida', () => {
+    const { data } = parse(buildUblInvoice({ prepaid: '50.00', payable: '68.00' }));
+    expect(data).toMatchObject({ prepaid_amount: '50.00', total: '68.00', notes: [] });
+    expect(validateParsed(data).status).toBe('valid');
+  });
+});

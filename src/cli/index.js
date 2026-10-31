@@ -9,6 +9,8 @@ import { registerExport } from './commands/export.js';
 import { registerDuplicates, registerReview, registerStatus } from './commands/queries.js';
 import { registerConfig, registerDoctor } from './commands/diagnostics.js';
 import { registerVerifySunat } from './commands/verify-sunat.js';
+import { registerRun } from './commands/run.js';
+import { registerBackup } from './commands/backup.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 
@@ -57,6 +59,8 @@ export function buildProgram() {
   registerRetry(program, run);
   registerDoctor(program, run);
   registerVerifySunat(program, run);
+  registerRun(program, run);
+  registerBackup(program, run);
   registerConfig(program, run);
   return program;
 }

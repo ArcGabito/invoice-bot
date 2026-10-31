@@ -2,6 +2,8 @@
 
 `invoicebot export` genera un CSV en UTF-8, con fin de línea CRLF, una fila de encabezados y una fila por factura. Por defecto usa coma como separador (`--delimiter ";"` para Excel en español) y no añade BOM (`--bom` para Excel).
 
+Con `--xlsx` las mismas columnas, en el mismo orden, se escriben en la hoja *Facturas* de un Excel con encabezados legibles, importes numéricos y fechas reales; la hoja *Resumen* trae totales por moneda y estado de validación.
+
 Las columnas, su orden y sus nombres son estables dentro de una versión mayor. Las nuevas columnas se añaden al final.
 
 | Columna | Formato | Descripción |
@@ -34,6 +36,7 @@ Las columnas, su orden y sus nombres son estables dentro de una versión mayor. 
 | `sha256` | hex | Huella del archivo original. |
 | `data_source` | `xml`, `ai` | Origen de los datos: el XML del comprobante electrónico (exacto) o la extracción con IA desde el PDF (propuesta, validada). Añadida en v0.2.0. |
 | `sunat_status` | texto o vacío | Último estado del comprobante según la consulta de validez de SUNAT: `ACEPTADO`, `AUTORIZADO`, `ANULADO`, `NO EXISTE` o `NO AUTORIZADO`. Vacío si no se ha consultado (`invoicebot verify-sunat`). Añadida en v0.2.0. |
+| `prepaid_amount` | decimal | Anticipos ya pagados y deducidos del total de este comprobante. Añadida en v0.2.0. |
 
 **Importes**: punto como separador decimal, dos decimales, sin separador de miles ni símbolo de moneda (`1234.50`). Un campo vacío significa que el dato no aparece en el comprobante; no equivale a cero.
 

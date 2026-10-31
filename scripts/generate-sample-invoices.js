@@ -68,4 +68,17 @@ writeTextPdf(path.join(outDir, `${stem}.pdf`), [
 ]);
 writeUbl(path.join(outDir, `R-${stem}.xml`), buildCdr(electronic.id));
 
+// Factura final con un anticipo de S/ 500 ya pagado: el total a pagar lo descuenta.
+writeUbl(
+  path.join(outDir, '20131312955-01-F002-00000311.xml'),
+  buildUblInvoice({
+    ...electronic,
+    id: 'F002-00000311',
+    taxes: [{ scheme: '1000', taxable: '1000.00', tax: '180.00' }],
+    lineExtension: '1000.00',
+    prepaid: '500.00',
+    payable: '680.00',
+  }),
+);
+
 console.log(`Comprobantes de prueba creados en ${outDir}`);

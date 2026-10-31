@@ -4,9 +4,13 @@ import { EXIT_CODES } from '../../shared/errors.js';
 export function registerExport(program, run) {
   program
     .command('export')
-    .description('Exporta facturas a CSV (por defecto: válidas y con advertencias, sin duplicados)')
+    .description(
+      'Exporta facturas a CSV o Excel (por defecto: válidas y con advertencias, sin duplicados)',
+    )
     .option('-m, --month <AAAA-MM>', 'periodo de emisión, p. ej. 2026-10')
-    .option('--csv', 'formato CSV (único formato disponible por ahora)', true)
+    .option('-f, --format <formato>', 'csv o xlsx (por defecto: INVOICEBOT_EXPORT_FORMAT, o csv)')
+    .option('--csv', 'atajo de --format csv')
+    .option('--xlsx', 'atajo de --format xlsx')
     .option(
       '-s, --status <lista>',
       'estados de validación separados por comas: valid,warning,error',
@@ -15,18 +19,24 @@ export function registerExport(program, run) {
     .option('--include-duplicates', 'incluye las repeticiones de un mismo comprobante', false)
     .option('--supplier <ruc>', 'solo un proveedor')
     .option('--currency <código>', 'solo una moneda (PEN, USD…)')
-    .option('-o, --output <archivo>', 'ruta del CSV (por defecto: exports/invoices-AAAA-MM.csv)')
-    .option('--delimiter <carácter>', 'separador de campos', ',')
-    .option('--bom', 'añade BOM UTF-8 (recomendado para abrir en Excel)', false)
+    .option(
+      '-o, --output <archivo>',
+      'ruta del archivo (por defecto: exports/invoices-AAAA-MM.<formato>)',
+    )
+    .option('--delimiter <carácter>', 'separador de campos del CSV', ',')
+    .option('--bom', 'añade BOM UTF-8 al CSV (recomendado para abrirlo en Excel)', false)
     .action((options) =>
       run(async (ctx, out) => {
-        const result = exportInvoices({
+        const format =
+          options.format ?? (options.xlsx ? 'xlsx' : options.csv ? 'csv' : ctx.config.exportFormat);
+        const result = await exportInvoices({
           month: options.month ?? null,
           statuses: options.status ? options.status.split(',').map((s) => s.trim()) : null,
           includeErrors: options.includeErrors,
           includeDuplicates: options.includeDuplicates,
           supplierRuc: options.supplier ?? null,
           currency: options.currency ?? null,
+          format: format.toLowerCase(),
           output: options.output ?? null,
           delimiter: options.delimiter === '\\t' ? '\t' : options.delimiter,
           bom: options.bom,

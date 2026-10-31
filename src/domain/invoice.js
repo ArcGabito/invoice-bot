@@ -57,6 +57,8 @@ export const AMOUNT_FIELDS = Object.freeze([
   'other_charges',
   'other_taxes',
   'total',
+  /** Anticipos aplicados: el total ya los descuenta. */
+  'prepaid_amount',
 ]);
 
 function cleanText(value) {

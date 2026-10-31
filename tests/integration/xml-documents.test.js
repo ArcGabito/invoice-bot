@@ -101,10 +101,10 @@ describe('comprobantes electrónicos XML', () => {
     const second = await scanInvoices({ root: inbox, deps });
     expect(second.possibleDuplicates).toBe(1);
 
-    const result = exportInvoices({ month: '2026-10', deps });
+    const result = await exportInvoices({ month: '2026-10', deps });
     const lines = fs.readFileSync(result.path, 'utf8').trim().split('\r\n');
     expect(result.rows).toBe(1);
-    expect(lines[1]).toMatch(/,F001-00001234\.xml,[0-9a-f]{64},xml,$/);
+    expect(lines[1]).toMatch(/,F001-00001234\.xml,[0-9a-f]{64},xml,,$/);
   });
 
   it('marca como error un XML con importes incoherentes', async () => {

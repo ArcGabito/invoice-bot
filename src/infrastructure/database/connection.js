@@ -9,14 +9,16 @@ const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '
  * Abre (o crea) la base de datos y aplica las migraciones pendientes.
  * Usa ':memory:' en pruebas.
  */
-export function openDatabase(dbPath) {
+export function openDatabase(dbPath, { backupDir = null } = {}) {
   const inMemory = dbPath === ':memory:';
   if (!inMemory) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   if (!inMemory) db.pragma('journal_mode = WAL');
-  runMigrations(db, { backupDir: inMemory ? null : path.join(path.dirname(dbPath), 'backups') });
+  runMigrations(db, {
+    backupDir: inMemory ? null : (backupDir ?? path.join(path.dirname(dbPath), 'backups')),
+  });
   return db;
 }
 
