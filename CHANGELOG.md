@@ -17,11 +17,16 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
   - `gmail`: API de Gmail con inicio de sesión del usuario, o cuenta de servicio con delegación de dominio en Google Workspace.
   - `graph`: Microsoft Graph para Outlook.com y Microsoft 365, con inicio de sesión del usuario (código de dispositivo) o permiso de aplicación.
 - Comandos `invoicebot mail login`, `mail check`, `mail fetch` y `mail list`. Tabla `mail_messages`: cada mensaje se lee una vez y los que fallan se reintentan hasta `INVOICEBOT_MAX_ATTEMPTS`. Si el servidor rechaza las credenciales, el ciclo sigue y queda como parcial.
+- **Modo empresa del correo**:
+  - Microsoft 365 con **certificado** (`INVOICEBOT_MAIL_MS_CERT_FILE`, client assertion firmado) en vez de client secret.
+  - **Ordenar el buzón** (opcional): `INVOICEBOT_MAIL_PROCESSED_FOLDER` y `INVOICEBOT_MAIL_REVIEW_FOLDER` mueven cada correo leído a su carpeta o etiqueta, creándola si no existe. Si falta el permiso de escritura, el correo queda registrado y se mueve en un ciclo posterior, sin descargarlo otra vez.
+  - **Trazabilidad**: tabla `mail_attachments` (migración 4); `invoicebot show` y la pantalla de revisión muestran de qué correo vino cada factura.
+  - Guía para TI: [docs/correo-empresa.md](docs/correo-empresa.md), con RBAC para aplicaciones de Exchange Online (acceso limitado al buzón de facturas) y la delegación de dominio de Google Workspace.
 - Docker Compose guarda los adjuntos en el volumen de datos (`INVOICEBOT_MAIL_DIR=/app/data/correo`), porque la carpeta de entrada se monta como solo lectura; `run` escanea esa carpeta también.
 
 ### Cambiado
 
-- Migraciones 2 (detracciones y tipo de cambio) y 3 (correos leídos) del esquema (se aplican con `invoicebot db migrate`, con copia previa automática).
+- Migraciones 2 (detracciones y tipo de cambio), 3 (correos leídos) y 4 (trazabilidad del correo) del esquema (se aplican con `invoicebot db migrate`, con copia previa automática).
 - Versiones: reglas de validación `2026.10.3`, prompt `invoice-extraction/2026-10-31.3`, lector UBL `ubl-2.1-sunat/2026-10-31.1`.
 - La fecha de vencimiento del XML se toma de cualquier término de pago que la tenga, no solo del primero.
 

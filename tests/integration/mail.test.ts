@@ -6,11 +6,9 @@ import { runBot } from '../../src/application/use-cases/run-bot.ts';
 import { createMailSource } from '../../src/infrastructure/mail/mail-factory.ts';
 import type { MailEndpoints } from '../../src/infrastructure/mail/mail-factory.ts';
 import { readMailToken, writeMailToken } from '../../src/infrastructure/mail/token-store.ts';
-import { buildMimeMessage, buildZip } from '../helpers/mail-builder.ts';
-import { buildUblInvoice } from '../helpers/ubl-builder.ts';
-import { sampleInvoiceLines, writeTextPdf } from '../helpers/pdf-builder.ts';
+import { buildMimeMessage } from '../helpers/mail-builder.ts';
+import { daysAgo, mailbox, savedFiles } from '../helpers/mailbox.ts';
 import { startFakeGmail, startFakeGraph, startFakeImap } from '../helpers/fake-mail-servers.ts';
-import type { FakeMessage } from '../helpers/fake-mail-servers.ts';
 import { makeTestDeps } from '../helpers/context.ts';
 import type { TestContext } from '../helpers/context.ts';
 import { sqlAll, sqlGet } from '../helpers/db.ts';
@@ -20,67 +18,6 @@ afterEach(async () => {
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 
-const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
-
-/** PDF real (con texto) de una factura, como el que adjuntan los emisores. */
-function invoicePdf(dir: string, number: string): Buffer {
-  const file = path.join(dir, `tmp-${number}.pdf`);
-  writeTextPdf(file, sampleInvoiceLines({ number }));
-  const content = fs.readFileSync(file);
-  fs.rmSync(file);
-  return content;
-}
-
-/** Tres correos: XML + PDF sueltos, un ZIP con XML + PDF y uno sin comprobantes. */
-function mailbox(dir: string): FakeMessage[] {
-  return [
-    {
-      id: 'm1',
-      receivedAt: daysAgo(3),
-      raw: buildMimeMessage({
-        subject: 'Factura F001-00000001',
-        attachments: [
-          {
-            name: 'F001-00000001.xml',
-            type: 'text/xml',
-            content: buildUblInvoice({ id: 'F001-00000001' }),
-          },
-          {
-            name: 'F001-00000001.pdf',
-            type: 'application/pdf',
-            content: invoicePdf(dir, '00000001'),
-          },
-        ],
-      }),
-    },
-    {
-      id: 'm2',
-      receivedAt: daysAgo(2),
-      raw: buildMimeMessage({
-        subject: 'Comprobante electrónico',
-        attachments: [
-          {
-            name: '20100047218-01-F001-00000002.zip',
-            type: 'application/zip',
-            content: buildZip({
-              '20100047218-01-F001-00000002.xml': buildUblInvoice({ id: 'F001-00000002' }),
-              '20100047218-01-F001-00000002.pdf': invoicePdf(dir, '00000002'),
-            }),
-          },
-        ],
-      }),
-    },
-    {
-      id: 'm3',
-      receivedAt: daysAgo(1),
-      raw: buildMimeMessage({
-        subject: 'Contrato',
-        attachments: [{ name: 'contrato.docx', type: 'application/octet-stream', content: 'x' }],
-      }),
-    },
-  ];
-}
-
 async function setup(env: Record<string, string>, endpoints: MailEndpoints) {
   const ctx: TestContext = await makeTestDeps({ env });
   cleanup.push(() => fs.rmSync(ctx.dir, { recursive: true, force: true }));
@@ -89,14 +26,6 @@ async function setup(env: Record<string, string>, endpoints: MailEndpoints) {
   const source = () => createMailSource(ctx.deps.config, env, endpoints);
   return { ...ctx, inbox, mailDir: path.join(inbox, 'correo'), source };
 }
-
-const savedFiles = (dir: string) =>
-  fs.existsSync(dir)
-    ? (fs.readdirSync(dir, { recursive: true }) as string[])
-        .filter((f) => path.extname(f))
-        .map((f) => path.basename(f))
-        .sort()
-    : [];
 
 describe('correo con la API de Gmail', () => {
   it('descarga los comprobantes una sola vez y el ciclo los procesa', async () => {
@@ -126,6 +55,9 @@ describe('correo con la API de Gmail', () => {
       noAttachments: 1,
       failed: 0,
       remaining: 0,
+      // Sin carpetas de destino configuradas, el buzón no se toca.
+      moved: 0,
+      moveFailed: 0,
     });
     expect(gmail.state.queries[0]).toMatch(/^has:attachment -in:sent -in:drafts after:\d+$/);
     expect(savedFiles(t.mailDir)).toEqual([

@@ -45,7 +45,10 @@ function requireUser(user: string | null | undefined): string {
 const openIssues = async (repository: InvoiceRepository, invoiceId: number) =>
   (await repository.getIssues(invoiceId)).filter((i) => !i.resolved_at);
 
-/** Todo lo necesario para revisar una factura: datos, incidencias, historial y extracciones. */
+/**
+ * Todo lo necesario para revisar una factura: datos, incidencias, historial,
+ * extracciones y, si llegó por correo, de qué mensaje vino.
+ */
 export async function getInvoiceDetail({ deps, invoiceId }: { deps: ReviewDeps; invoiceId: Id }) {
   const { repository } = deps;
   const invoice = await requireInvoice(repository, invoiceId);
@@ -53,6 +56,10 @@ export async function getInvoiceDetail({ deps, invoiceId }: { deps: ReviewDeps; 
     invoice,
     issues: await repository.getIssues(invoice.id),
     actions: await repository.listReviewActions(invoice.id),
+    mailOrigins: await (async () => {
+      const document = await repository.getDocument(invoice.document_id);
+      return document ? repository.findMailOrigins(document.sha256) : [];
+    })(),
     extractionRuns: (await repository.listExtractionRuns(invoice.document_id)).map((r) => ({
       id: r.id,
       provider: r.provider,

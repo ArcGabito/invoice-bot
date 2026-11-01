@@ -22,6 +22,10 @@ export interface MailSummary {
   failed: number;
   /** Mensajes nuevos que quedan para el siguiente ciclo (por INVOICEBOT_MAIL_MAX_MESSAGES). */
   remaining: number;
+  /** Mensajes movidos a la carpeta de procesados o de revisión. */
+  moved: number;
+  /** Mensajes que no se pudieron mover (se reintenta en el siguiente ciclo). */
+  moveFailed: number;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -40,6 +44,11 @@ export function messageFolder(date: Date, messageId: string): string {
  * adjuntos de un mensaje quedan juntos en su carpeta: así el PDF se vincula
  * con su XML. Cada mensaje se lee una sola vez; los que fallan se reintentan
  * en los ciclos siguientes hasta INVOICEBOT_MAX_ATTEMPTS.
+ *
+ * Con INVOICEBOT_MAIL_PROCESSED_FOLDER / _REVIEW_FOLDER, cada mensaje leído
+ * se mueve a esa carpeta: con comprobantes, a la de procesados; sin ellos, a
+ * la de revisión. Si mover falla (p. ej. falta permiso de escritura) el
+ * mensaje queda registrado igual y se intenta moverlo en el ciclo siguiente.
  *
  * Si el servidor rechaza las credenciales se detiene con MailError (auth).
  */
@@ -72,6 +81,9 @@ export async function fetchMail({
       return !seen || (seen.status === 'failed' && seen.attempts < config.maxAttempts);
     });
     const batch = pending.slice(0, config.mail.maxMessages);
+    const { processedFolder, reviewFolder } = config.mail;
+    const targetFor = (status: string) =>
+      status === 'saved' ? processedFolder : status === 'no_attachments' ? reviewFolder : null;
     const summary: MailSummary = {
       account,
       listed: refs.length,
@@ -81,7 +93,33 @@ export async function fetchMail({
       noAttachments: 0,
       failed: 0,
       remaining: pending.length - batch.length,
+      moved: 0,
+      moveFailed: 0,
     };
+
+    /** Mueve el mensaje si corresponde; un fallo no impide seguir con el resto. */
+    const moveMessage = async (id: string, recordId: number, status: string) => {
+      const target = targetFor(status);
+      if (!target) return;
+      try {
+        await source.move(id, target);
+        await repository.setMailMessageMoved(recordId, target);
+        summary.moved++;
+      } catch (error) {
+        summary.moveFailed++;
+        log.warn(
+          { id, target, err: { message: errorMessage(error) } },
+          'no se pudo mover el mensaje',
+        );
+      }
+    };
+
+    // Leídos en ciclos anteriores que aún no se movieron (p. ej. se activó después o faltaba permiso).
+    for (const ref of refs) {
+      const seen = known.get(ref.id);
+      if (seen && !seen.moved_to && seen.status !== 'failed')
+        await moveMessage(ref.id, seen.id, seen.status);
+    }
 
     for (const ref of batch) {
       const record = {
@@ -101,26 +139,32 @@ export async function fetchMail({
         summary.read++;
         if (mail.files.length === 0) {
           summary.noAttachments++;
-          await repository.recordMailMessage({
+          const id = await repository.recordMailMessage({
             ...record,
             status: 'no_attachments',
             files: 0,
             folder: null,
             errorMessage: null,
           });
+          await moveMessage(ref.id, id, 'no_attachments');
           continue;
         }
         const folder = messageFolder(new Date(record.receivedAt ?? now), ref.id);
         const target = path.join(dir, folder);
         fs.mkdirSync(target, { recursive: true });
         for (const file of mail.files) fs.writeFileSync(path.join(target, file.name), file.content);
-        await repository.recordMailMessage({
+        const id = await repository.recordMailMessage({
           ...record,
           status: 'saved',
           files: mail.files.length,
           folder,
           errorMessage: null,
+          attachments: mail.files.map((f) => ({
+            sha256: crypto.createHash('sha256').update(f.content).digest('hex'),
+            fileName: f.name,
+          })),
         });
+        await moveMessage(ref.id, id, 'saved');
         summary.saved++;
         summary.files += mail.files.length;
         log.info(

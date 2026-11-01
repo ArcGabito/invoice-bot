@@ -102,6 +102,7 @@ export async function closeWorkerDatabase(): Promise<void> {
 
 /** Tablas en orden de borrado (las que referencian a otras, primero). */
 const TABLES = [
+  'mail_attachments',
   'mail_messages',
   'review_sessions',
   'users',

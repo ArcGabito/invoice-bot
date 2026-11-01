@@ -208,7 +208,7 @@ export function renderReviewPage({
   }
 
   function renderDetail() {
-    const { invoice: inv, issues, actions } = state.detail;
+    const { invoice: inv, issues, actions, mailOrigins = [] } = state.detail;
     const open = issues.filter((i) => !i.resolved_at);
     const resolved = issues.filter((i) => i.resolved_at);
     const openErrors = open.filter((i) => i.severity === 'error');
@@ -254,6 +254,8 @@ export function renderReviewPage({
     $('#detail').replaceChildren(...nodes(
       el('h2', { text: '#' + inv.id + ' · ' + [inv.series, inv.number].filter(Boolean).join('-') + ' · ' + (inv.supplier_name || '') }),
       el('div', { class: 'note', text: inv.file_name + ' · origen: ' + (inv.data_source === 'xml' ? 'XML (exacto)' : 'IA') + (inv.sunat_status ? ' · SUNAT: ' + inv.sunat_status : '') }),
+      mailOrigins.map((m) => el('div', { class: 'note', text: 'Llegó por correo de ' + (m.sender || '—') + ' · «' + (m.subject || '') + '» · ' +
+        (m.received_at ? new Date(m.received_at).toLocaleString('es-PE') : '') + ' · buzón ' + m.account })),
       el('div', { class: 'badges' },
         el('span', { class: 'badge ' + inv.review_status, text: REVIEW[inv.review_status] + (inv.reviewed_by ? ' por ' + inv.reviewed_by : '') }),
         el('span', { class: 'badge ' + inv.validation_status, text: VALIDATION[inv.validation_status] }),

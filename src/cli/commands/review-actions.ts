@@ -56,12 +56,23 @@ const AMOUNT_ROWS: [string, keyof InvoiceDetail][] = [
   ['Total', 'total_cents'],
 ];
 
-function printDetail(out: Printer, { invoice: i, issues, actions }: InvoiceDetailView): void {
+function printDetail(
+  out: Printer,
+  { invoice: i, issues, actions, mailOrigins }: InvoiceDetailView,
+): void {
   out.line(
     `Factura #${i.id} · revisión: ${REVIEW_LABEL[i.review_status]}${i.reviewed_by ? ` (${i.reviewed_by})` : ''} · validación: ${i.validation_status}${i.corrected ? ' · corregida a mano' : ''}`,
   );
   out.line(`Archivo: ${i.file_path}`);
   out.line(`Origen: ${i.data_source}${i.sunat_status ? ` · SUNAT: ${i.sunat_status}` : ''}`);
+  for (const m of mailOrigins) {
+    const when = m.received_at
+      ? new Date(m.received_at).toLocaleString('es-PE')
+      : 'fecha desconocida';
+    out.line(
+      `Correo: ${m.sender ?? '—'} · "${m.subject ?? ''}" · ${when} · buzón ${m.account}${m.moved_to ? ` · movido a ${m.moved_to}` : ''}`,
+    );
+  }
   out.line();
   for (const [label, get] of FIELD_ROWS) out.line(`  ${label.padEnd(22)} ${get(i) || '—'}`);
   for (const [label, col] of AMOUNT_ROWS) {

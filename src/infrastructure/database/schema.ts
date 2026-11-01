@@ -180,8 +180,16 @@ export interface MailMessagesTable {
   folder: string | null;
   attempts: Generated<number>;
   error_message: string | null;
+  /** Carpeta o etiqueta a la que se movió el mensaje (null: no se movió). */
+  moved_to: string | null;
   created_at: Timestamp;
   updated_at: Timestamp;
+}
+
+export interface MailAttachmentsTable {
+  mail_message_id: number;
+  sha256: string;
+  file_name: string;
 }
 
 export interface SchemaMigrationsTable {
@@ -203,6 +211,7 @@ export interface Database {
   review_sessions: ReviewSessionsTable;
   exchange_rates: ExchangeRatesTable;
   mail_messages: MailMessagesTable;
+  mail_attachments: MailAttachmentsTable;
   schema_migrations: SchemaMigrationsTable;
 }
 

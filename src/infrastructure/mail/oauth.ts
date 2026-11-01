@@ -222,3 +222,95 @@ export function googleServiceAccountProvider({
     return { token: body.access_token, expiresIn: body.expires_in ?? 3600 };
   });
 }
+
+/**
+ * Lee un PEM con el certificado de la aplicación y su clave privada (p. ej.
+ * convertido de un .pfx con `openssl pkcs12 -in app.pfx -out app.pem -nodes`).
+ */
+export function readCertificatePem(
+  pem: string,
+  passphrase?: string,
+): { thumbprintS256: string; privateKey: crypto.KeyObject } {
+  const certBlock = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/.exec(pem)?.[0];
+  if (!certBlock) throw new MailError('El archivo no contiene un certificado (BEGIN CERTIFICATE)');
+  let privateKey: crypto.KeyObject;
+  try {
+    privateKey = crypto.createPrivateKey({
+      key: pem,
+      format: 'pem',
+      ...(passphrase && { passphrase }),
+    });
+  } catch (error) {
+    throw new MailError(
+      `No se pudo leer la clave privada del certificado: ${errorMessage(error)}. ` +
+        'El PEM debe incluir la clave (si está cifrada, define INVOICEBOT_MAIL_MS_CERT_PASSPHRASE).',
+    );
+  }
+  const cert = new crypto.X509Certificate(certBlock);
+  if (!cert.checkPrivateKey(privateKey)) {
+    throw new MailError('La clave privada no corresponde al certificado');
+  }
+  if (new Date(cert.validTo) < new Date()) {
+    throw new MailError(
+      `El certificado venció el ${cert.validTo}: genera uno nuevo y súbelo a la aplicación`,
+    );
+  }
+  return {
+    thumbprintS256: crypto.createHash('sha256').update(cert.raw).digest('base64url'),
+    privateKey,
+  };
+}
+
+/**
+ * Permiso de aplicación (Microsoft 365) con certificado en vez de client
+ * secret: la aplicación se identifica con un JWT firmado con su clave
+ * privada (client assertion). Es lo que suelen exigir las áreas de TI.
+ */
+export function clientCertificateProvider({
+  tokenUrl,
+  clientId,
+  certificate,
+  scope,
+  fetchImpl,
+  timeoutMs,
+}: {
+  tokenUrl: string;
+  clientId: string;
+  certificate: ReturnType<typeof readCertificatePem>;
+  scope: string;
+  fetchImpl?: Fetch;
+  timeoutMs?: number;
+}): TokenProvider {
+  return cached(async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const unsigned = `${base64url(
+      JSON.stringify({ alg: 'RS256', typ: 'JWT', 'x5t#S256': certificate.thumbprintS256 }),
+    )}.${base64url(
+      JSON.stringify({
+        aud: tokenUrl,
+        iss: clientId,
+        sub: clientId,
+        jti: crypto.randomUUID(),
+        nbf: now,
+        iat: now,
+        exp: now + 600,
+      }),
+    )}`;
+    const signature = crypto.sign('RSA-SHA256', Buffer.from(unsigned), certificate.privateKey);
+    const body = await requestToken(
+      tokenUrl,
+      {
+        grant_type: 'client_credentials',
+        client_id: clientId,
+        client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+        client_assertion: `${unsigned}.${base64url(signature)}`,
+        scope,
+      },
+      { fetchImpl, timeoutMs },
+    );
+    if (!body.access_token) {
+      throw tokenError(body, 'Microsoft rechazó el certificado de la aplicación');
+    }
+    return { token: body.access_token, expiresIn: body.expires_in ?? 3600 };
+  });
+}

@@ -38,7 +38,9 @@ export function printMailSummary(
     `${indent}Correo ${mail.account}: ${mail.read} mensajes nuevos · ${mail.files} archivos guardados` +
       (mail.noAttachments ? ` · ${mail.noAttachments} sin comprobantes` : '') +
       (mail.failed ? ` · ${mail.failed} con error` : '') +
-      (mail.remaining ? ` · ${mail.remaining} quedan para el siguiente ciclo` : ''),
+      (mail.remaining ? ` · ${mail.remaining} quedan para el siguiente ciclo` : '') +
+      (mail.moved ? ` · ${mail.moved} movidos` : '') +
+      (mail.moveFailed ? ` · ${mail.moveFailed} no se pudieron mover` : ''),
   );
 }
 
@@ -67,24 +69,32 @@ export function registerMail(program: Command, run: Runner): void {
             provider = 'gmail';
             clientId = cfg.google.clientId;
             const { googleLogin } = await import('../../infrastructure/mail/login.ts');
-            const { GOOGLE_TOKEN_URL } = await import('../../infrastructure/mail/mail-factory.ts');
+            const { GOOGLE_TOKEN_URL, loginScope } =
+              await import('../../infrastructure/mail/mail-factory.ts');
             ({ refreshToken } = await googleLogin({
               clientId,
               clientSecret: process.env.INVOICEBOT_MAIL_GOOGLE_CLIENT_SECRET ?? '',
               tokenUrl: GOOGLE_TOKEN_URL,
+              scope: loginScope(cfg),
               openBrowser,
               print,
             }));
-          } else if (cfg.provider === 'graph' && !cfg.microsoft.clientSecretSet) {
+          } else if (
+            cfg.provider === 'graph' &&
+            !cfg.microsoft.clientSecretSet &&
+            !cfg.microsoft.certFile
+          ) {
             if (!cfg.microsoft.clientId) {
               throw new ConfigError('Define INVOICEBOT_MAIL_MS_CLIENT_ID en .env');
             }
             provider = 'graph';
             clientId = cfg.microsoft.clientId;
             const { microsoftDeviceLogin } = await import('../../infrastructure/mail/login.ts');
+            const { loginScope } = await import('../../infrastructure/mail/mail-factory.ts');
             ({ refreshToken } = await microsoftDeviceLogin({
               clientId,
               tenant: cfg.microsoft.tenant,
+              scope: loginScope(cfg),
               print,
             }));
           } else {
@@ -181,7 +191,7 @@ export function registerMail(program: Command, run: Runner): void {
         for (const r of rows) {
           out.line(
             `${(r.received_at ?? r.created_at).slice(0, 16).replace('T', ' ')}  ${label[r.status as keyof typeof label] ?? r.status}` +
-              `${r.files ? ` (${r.files} archivos)` : ''}  ${r.sender ?? '—'}  ${r.subject ?? ''}`,
+              `${r.files ? ` (${r.files} archivos)` : ''}${r.moved_to ? ` → ${r.moved_to}` : ''}  ${r.sender ?? '—'}  ${r.subject ?? ''}`,
           );
           if (r.error_message) out.line(`    ${r.error_message}`);
         }

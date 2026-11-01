@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -18,6 +19,7 @@ type Route = (req: {
   method: string;
   url: URL;
   form: URLSearchParams;
+  json: Record<string, unknown>;
   token: string | null;
 }) => Reply | null;
 
@@ -34,6 +36,13 @@ async function startHttp(route: Route) {
       method: req.method ?? 'GET',
       url,
       form: new URLSearchParams(body),
+      json: (() => {
+        try {
+          return JSON.parse(body) as Record<string, unknown>;
+        } catch {
+          return {};
+        }
+      })(),
       token: auth?.startsWith('Bearer ') ? auth.slice(7) : null,
     }) ?? { status: 404, body: { error: { message: `ruta desconocida ${url.pathname}` } } };
     if (reply.raw) {
@@ -65,9 +74,29 @@ export async function startFakeGmail({
   refreshToken = 'rt-gmail',
   failing = new Set<string>(),
 } = {}) {
-  const state = { messages, failing, queries: [] as string[] };
-  const server = await startHttp(({ method, url, form, token }) => {
+  const state = {
+    messages,
+    failing,
+    queries: [] as string[],
+    labels: [{ id: 'INBOX', name: 'INBOX' }] as { id: string; name: string }[],
+    /** Etiqueta puesta a cada mensaje sacado de la bandeja de entrada. */
+    moved: new Map<string, string>(),
+    /** Claims del JWT de la cuenta de servicio (Google Workspace). */
+    jwtClaims: [] as Record<string, unknown>[],
+  };
+  const server = await startHttp(({ method, url: requested, form, json, token }) => {
+    // La cuenta de servicio pide /users/<buzón>/…: se trata igual que /users/me/….
+    const url = new URL(requested);
+    url.pathname = decodeURIComponent(url.pathname).replace(
+      /^\/gmail\/v1\/users\/[^/]+/,
+      '/gmail/v1/users/me',
+    );
     if (method === 'POST' && url.pathname === '/token') {
+      if (form.get('grant_type') === 'urn:ietf:params:oauth:grant-type:jwt-bearer') {
+        const payload = form.get('assertion')!.split('.')[1]!;
+        state.jwtClaims.push(JSON.parse(Buffer.from(payload, 'base64url').toString()));
+        return { body: { access_token: 'gmail-at', expires_in: 3600 } };
+      }
       return form.get('refresh_token') === refreshToken
         ? { body: { access_token: 'gmail-at', expires_in: 3600 } }
         : {
@@ -81,10 +110,26 @@ export async function startFakeGmail({
     if (token !== 'gmail-at') return unauthorized;
     const base = '/gmail/v1/users/me';
     if (url.pathname === `${base}/profile`) return { body: { emailAddress: account } };
+    if (url.pathname === `${base}/labels`) {
+      if (method === 'GET') return { body: { labels: state.labels } };
+      const label = { id: `Label_${state.labels.length}`, name: String(json.name) };
+      state.labels.push(label);
+      return { body: label };
+    }
+    const modify = /^\/gmail\/v1\/users\/me\/messages\/([^/]+)\/modify$/.exec(url.pathname);
+    if (modify && method === 'POST') {
+      const [labelId] = json.addLabelIds as string[];
+      if (!(json.removeLabelIds as string[]).includes('INBOX')) return { status: 400 };
+      state.moved.set(modify[1]!, state.labels.find((l) => l.id === labelId)!.name);
+      return { body: { id: modify[1] } };
+    }
     if (url.pathname === `${base}/messages`) {
       state.queries.push(url.searchParams.get('q') ?? '');
       // Gmail: del más reciente al más antiguo, en páginas (aquí de 2).
-      const all = [...state.messages].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
+      const inboxOnly = (url.searchParams.get('q') ?? '').includes('in:inbox');
+      const all = state.messages
+        .filter((x) => !(inboxOnly && state.moved.has(x.id)))
+        .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
       const start = Number(url.searchParams.get('pageToken') ?? 0);
       const page = all.slice(start, start + 2);
       return {
@@ -120,13 +165,56 @@ export async function startFakeGraph({
   messages = [] as FakeMessage[],
   clientSecret = 'secreto',
   refreshToken = 'rt-ms-1',
+  /** Certificado de la aplicación: se acepta un client assertion firmado con su clave. */
+  certificate = null as crypto.X509Certificate | null,
+  /** false: la aplicación solo puede leer (sin Mail.ReadWrite). */
+  writable = true,
 } = {}) {
-  const state = { messages, refreshToken, issued: 0, failing: new Set<string>() };
-  const server = await startHttp(({ method, url, form, token }) => {
+  const state = {
+    messages,
+    refreshToken,
+    issued: 0,
+    failing: new Set<string>(),
+    folders: [{ id: 'facturas-id', name: 'Facturas' }] as { id: string; name: string }[],
+    /** Carpeta a la que se movió cada mensaje. */
+    moved: new Map<string, string>(),
+    assertions: [] as { header: Record<string, unknown>; claims: Record<string, unknown> }[],
+  };
+  const server = await startHttp(({ method, url, form, json, token }) => {
     if (method === 'POST' && url.pathname.endsWith('/oauth2/v2.0/token')) {
       const grant = form.get('grant_type');
       if (grant === 'client_credentials' && form.get('client_secret') === clientSecret) {
         return { body: { access_token: 'graph-at', expires_in: 3600 } };
+      }
+      const assertion = form.get('client_assertion');
+      if (grant === 'client_credentials' && assertion && certificate) {
+        const [header, payload, signature] = assertion.split('.') as [string, string, string];
+        const decoded = {
+          header: JSON.parse(Buffer.from(header, 'base64url').toString()),
+          claims: JSON.parse(Buffer.from(payload, 'base64url').toString()),
+        };
+        state.assertions.push(decoded);
+        const thumbprint = crypto.createHash('sha256').update(certificate.raw).digest('base64url');
+        const valid =
+          crypto.verify(
+            'RSA-SHA256',
+            Buffer.from(header + '.' + payload),
+            certificate.publicKey,
+            Buffer.from(signature, 'base64url'),
+          ) &&
+          decoded.header['x5t#S256'] === thumbprint &&
+          decoded.claims.aud === server.url + url.pathname &&
+          decoded.claims.iss === form.get('client_id') &&
+          decoded.claims.exp > Date.now() / 1000;
+        return valid
+          ? { body: { access_token: 'graph-at', expires_in: 3600 } }
+          : {
+              status: 401,
+              body: {
+                error: 'invalid_client',
+                error_description: 'AADSTS700027: Client assertion failed signature validation.',
+              },
+            };
       }
       if (grant === 'refresh_token' && form.get('refresh_token') === state.refreshToken) {
         state.refreshToken = `rt-ms-${++state.issued + 1}`;
@@ -147,20 +235,33 @@ export async function startFakeGraph({
     const rest = path.slice(root.length);
     if (rest === '') return { body: { mail: me, userPrincipalName: me } };
     if (rest === '/mailFolders/inbox') return { body: { id: 'inbox-id' } };
+    if (rest === '/mailFolders/inbox/childFolders' && method === 'POST') {
+      if (!writable) return { status: 403, body: { error: { message: 'Access is denied.' } } };
+      const folder = { id: 'folder-' + state.folders.length, name: String(json.displayName) };
+      state.folders.push(folder);
+      return { status: 201, body: { id: folder.id, displayName: folder.name } };
+    }
     if (rest === '/mailFolders' || rest === '/mailFolders/inbox/childFolders') {
       const wanted = /displayName eq '(.*)'/.exec(url.searchParams.get('$filter') ?? '')?.[1];
+      const found = state.folders.filter((f) => f.name === wanted);
       return {
-        body: {
-          value:
-            rest.endsWith('childFolders') && wanted === 'Facturas' ? [{ id: 'facturas-id' }] : [],
-        },
+        body: { value: rest.endsWith('childFolders') ? found.map((f) => ({ id: f.id })) : [] },
       };
+    }
+    const move = /^\/messages\/([^/]+)\/move$/.exec(rest);
+    if (move && method === 'POST') {
+      if (!writable) return { status: 403, body: { error: { message: 'Access is denied.' } } };
+      const folder = state.folders.find((f) => f.id === json.destinationId);
+      if (!folder) return { status: 404, body: { error: { message: 'ErrorFolderNotFound' } } };
+      state.moved.set(move[1]!, folder.name);
+      return { status: 201, body: { id: move[1] + '-movido' } };
     }
     const list = /^\/mailFolders\/([^/]+)\/messages$/.exec(rest);
     if (list) {
       const since =
         /receivedDateTime ge (\S+)/.exec(url.searchParams.get('$filter') ?? '')?.[1] ?? '';
-      const all = state.messages.filter((m) => m.receivedAt >= since);
+      // Los movidos ya no están en la carpeta que se lee.
+      const all = state.messages.filter((m) => m.receivedAt >= since && !state.moved.has(m.id));
       const skip = Number(url.searchParams.get('$skiptoken') ?? 0);
       const next = new URL(url.toString().replace('http://127.0.0.1', server.url));
       next.searchParams.set('$skiptoken', String(skip + 2));
@@ -197,7 +298,13 @@ export async function startFakeImap({
   password = 'clave-app',
   messages = [] as (FakeMessage & { attachment: boolean })[],
 } = {}) {
-  const state = { commands: [] as string[], examined: false };
+  const state = {
+    commands: [] as string[],
+    examined: false,
+    /** Carpeta a la que se movió cada mensaje (por UID). */
+    moved: new Map<string, string>(),
+    created: [] as string[],
+  };
   const months = [
     'Jan',
     'Feb',
@@ -226,7 +333,7 @@ export async function startFakeImap({
   const uidOf = (m: FakeMessage) => Number(m.id);
 
   const server = net.createServer((socket) => {
-    socket.write('* OK [CAPABILITY IMAP4rev1 LITERAL+] Fake IMAP listo\r\n');
+    socket.write('* OK [CAPABILITY IMAP4rev1 LITERAL+ MOVE UIDPLUS] Fake IMAP listo\r\n');
     let buffer = '';
     socket.on('data', (chunk) => {
       buffer += chunk.toString('latin1');
@@ -246,13 +353,13 @@ export async function startFakeImap({
       state.commands.push(upper.startsWith('LOGIN') ? 'LOGIN ***' : command);
       const ok = (text = 'OK') => socket.write(`${tag} ${text}\r\n`);
       if (upper === 'CAPABILITY') {
-        socket.write('* CAPABILITY IMAP4rev1 LITERAL+\r\n');
+        socket.write('* CAPABILITY IMAP4rev1 LITERAL+ MOVE UIDPLUS\r\n');
         return ok();
       }
       if (upper.startsWith('LOGIN')) {
         const [, u, p] = /^LOGIN "?([^" ]+)"? "?([^"]+)"?$/i.exec(command) ?? [];
         return u === user && p === password
-          ? ok('OK [CAPABILITY IMAP4rev1 LITERAL+] Logged in')
+          ? ok('OK [CAPABILITY IMAP4rev1 LITERAL+ MOVE UIDPLUS] Logged in')
           : ok('NO [AUTHENTICATIONFAILED] Invalid credentials');
       }
       if (upper.startsWith('EXAMINE') || upper.startsWith('SELECT')) {
@@ -261,7 +368,11 @@ export async function startFakeImap({
           `* ${messages.length} EXISTS\r\n* 0 RECENT\r\n* OK [UIDVALIDITY 7] UIDs valid\r\n` +
             `* OK [UIDNEXT ${messages.length + 1}] Predicted next UID\r\n* FLAGS (\\Seen)\r\n`,
         );
-        return ok('OK [READ-ONLY] EXAMINE completed');
+        return ok(
+          upper.startsWith('SELECT')
+            ? 'OK [READ-WRITE] SELECT completed'
+            : 'OK [READ-ONLY] EXAMINE completed',
+        );
       }
       if (upper.startsWith('UID SEARCH')) {
         socket.write(`* SEARCH ${messages.map(uidOf).join(' ')}\r\n`);
@@ -284,6 +395,24 @@ export async function startFakeImap({
             socket.write(')\r\n');
           }
         });
+        return ok();
+      }
+      if (upper.startsWith('CREATE')) {
+        const name = command.slice(7).replace(/^"|"$/g, '');
+        if (state.created.includes(name)) return ok('NO [ALREADYEXISTS] Mailbox exists');
+        state.created.push(name);
+        return ok();
+      }
+      if (upper.startsWith('UID MOVE')) {
+        const [, , uid, ...rest] = command.split(' ');
+        const target = rest.join(' ').replace(/^"|"$/g, '');
+        const index = messages.findIndex((m) => m.id === uid);
+        if (index < 0) return ok('NO No such message');
+        messages.splice(index, 1);
+        state.moved.set(uid!, target);
+        socket.write(
+          '* OK [COPYUID 1 ' + uid + ' ' + uid + '] Moved\r\n* ' + (index + 1) + ' EXPUNGE\r\n',
+        );
         return ok();
       }
       if (upper === 'LOGOUT') {

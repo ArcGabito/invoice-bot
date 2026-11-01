@@ -21,6 +21,11 @@ export interface MailSource {
   listMessages(options: { since: Date }): Promise<MailMessageRef[]>;
   /** Mensaje completo en formato MIME (RFC 5322). */
   fetchRaw(id: string): Promise<Buffer>;
+  /**
+   * Mueve el mensaje a una carpeta (Gmail: le pone esa etiqueta y lo saca de
+   * la bandeja de entrada), creándola si no existe. Exige permiso de escritura.
+   */
+  move(id: string, folder: string): Promise<void>;
   close(): Promise<void>;
 }
 

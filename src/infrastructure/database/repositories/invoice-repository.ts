@@ -576,22 +576,35 @@ export class InvoiceRepository {
   async findMailMessages(
     account: string,
     messageIds: readonly string[],
-  ): Promise<Map<string, Pick<MailMessageRow, 'status' | 'attempts'>>> {
-    const found = new Map<string, Pick<MailMessageRow, 'status' | 'attempts'>>();
+  ): Promise<Map<string, Pick<MailMessageRow, 'id' | 'status' | 'attempts' | 'moved_to'>>> {
+    const found = new Map<
+      string,
+      Pick<MailMessageRow, 'id' | 'status' | 'attempts' | 'moved_to'>
+    >();
     // SQL Server admite hasta 2100 parámetros por consulta.
     for (let i = 0; i < messageIds.length; i += 500) {
       const rows = await this.db
         .selectFrom('mail_messages')
-        .select(['message_id', 'status', 'attempts'])
+        .select(['id', 'message_id', 'status', 'attempts', 'moved_to'])
         .where('account', '=', account)
         .where('message_id', 'in', messageIds.slice(i, i + 500))
         .execute();
-      for (const r of rows) found.set(r.message_id, { status: r.status, attempts: r.attempts });
+      for (const r of rows) {
+        found.set(r.message_id, {
+          id: r.id,
+          status: r.status,
+          attempts: r.attempts,
+          moved_to: r.moved_to,
+        });
+      }
     }
     return found;
   }
 
-  /** Registra el resultado de leer un mensaje; si falló antes, suma un intento. */
+  /**
+   * Registra el resultado de leer un mensaje (si falló antes, suma un
+   * intento) y los archivos que trajo, por su SHA-256.
+   */
   async recordMailMessage(m: {
     account: string;
     messageId: string;
@@ -602,8 +615,9 @@ export class InvoiceRepository {
     files: number;
     folder: string | null;
     errorMessage: string | null;
-  }): Promise<void> {
-    await sql`
+    attachments?: { sha256: string; fileName: string }[];
+  }): Promise<number> {
+    const merged = await sql<{ id: number }>`
       MERGE mail_messages WITH (HOLDLOCK) AS t
       USING (SELECT ${m.account} AS account, ${m.messageId} AS message_id) AS s
         ON t.account = s.account AND t.message_id = s.message_id
@@ -614,7 +628,48 @@ export class InvoiceRepository {
       WHEN NOT MATCHED THEN
         INSERT (account, message_id, received_at, sender, subject, status, files, folder, error_message)
         VALUES (${m.account}, ${m.messageId}, ${m.receivedAt}, ${m.sender}, ${m.subject},
-          ${m.status}, ${m.files}, ${m.folder}, ${m.errorMessage});`.execute(this.db);
+          ${m.status}, ${m.files}, ${m.folder}, ${m.errorMessage})
+      OUTPUT inserted.id;`.execute(this.db);
+    const id = merged.rows[0]!.id;
+    if (m.attachments?.length) {
+      await this.db.deleteFrom('mail_attachments').where('mail_message_id', '=', id).execute();
+      // Un mismo archivo puede venir dos veces en el mensaje (suelto y dentro del ZIP).
+      const unique = [...new Map(m.attachments.map((a) => [a.sha256, a])).values()];
+      await this.db
+        .insertInto('mail_attachments')
+        .values(
+          unique.map((a) => ({
+            mail_message_id: id,
+            sha256: a.sha256,
+            file_name: a.fileName.slice(0, 260),
+          })),
+        )
+        .execute();
+    }
+    return id;
+  }
+
+  async setMailMessageMoved(id: number, movedTo: string): Promise<void> {
+    await this.db
+      .updateTable('mail_messages')
+      .set({ moved_to: movedTo, updated_at: utcNow })
+      .where('id', '=', id)
+      .execute();
+  }
+
+  /** Correos que trajeron un documento (puede llegar más de una vez). */
+  async findMailOrigins(
+    sha256: string,
+  ): Promise<
+    Pick<MailMessageRow, 'account' | 'sender' | 'subject' | 'received_at' | 'moved_to'>[]
+  > {
+    return this.db
+      .selectFrom('mail_attachments as a')
+      .innerJoin('mail_messages as m', 'm.id', 'a.mail_message_id')
+      .select(['m.account', 'm.sender', 'm.subject', 'm.received_at', 'm.moved_to'])
+      .where('a.sha256', '=', sha256)
+      .orderBy('m.received_at')
+      .execute();
   }
 
   async listMailMessages({ limit = 20 }: { limit?: number } = {}): Promise<MailMessageRow[]> {

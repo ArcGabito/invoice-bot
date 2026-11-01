@@ -351,4 +351,29 @@ const mailMessages: Migration = {
   ],
 };
 
-export const MIGRATIONS: Migration[] = [initial, detractionAndExchange, mailMessages];
+/**
+ * Trazabilidad del correo: qué archivos trajo cada mensaje (por SHA-256, el
+ * mismo que identifica al documento) y a qué carpeta se movió el mensaje.
+ */
+const mailTraceability: Migration = {
+  version: 4,
+  name: '004_mail_traceability',
+  batches: [
+    `ALTER TABLE mail_messages ADD moved_to NVARCHAR(400) NULL`,
+    `CREATE TABLE mail_attachments (
+      mail_message_id  INT           NOT NULL
+        CONSTRAINT fk_mail_attachments_message REFERENCES mail_messages (id) ON DELETE CASCADE,
+      sha256           NVARCHAR(64)  NOT NULL,
+      file_name        NVARCHAR(260) NOT NULL,
+      CONSTRAINT pk_mail_attachments PRIMARY KEY (mail_message_id, sha256)
+    )`,
+    `CREATE INDEX ix_mail_attachments_sha256 ON mail_attachments (sha256)`,
+  ],
+};
+
+export const MIGRATIONS: Migration[] = [
+  initial,
+  detractionAndExchange,
+  mailMessages,
+  mailTraceability,
+];

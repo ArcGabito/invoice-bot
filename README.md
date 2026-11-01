@@ -265,14 +265,14 @@ El IGV no se calcula sobre todo el subtotal cuando hay operaciones exoneradas o 
 
 El acceso es **de solo lectura**: InvoiceBot no borra, mueve ni marca como leído ningún mensaje. Todo se configura en `.env`:
 
-| Buzón                                             | `INVOICEBOT_MAIL_PROVIDER` | Qué necesitas                                                                                                                                                                                                       |
-| ------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Gmail personal                                    | `imap`                     | Verificación en dos pasos activada y una [contraseña de aplicación](https://myaccount.google.com/apppasswords) en `INVOICEBOT_MAIL_PASSWORD`. El servidor se deduce de la dirección.                                |
-| Correo de hosting (cPanel, Zimbra), Zoho, Yahoo   | `imap`                     | Servidor IMAP (`INVOICEBOT_MAIL_IMAP_HOST`), usuario y contraseña.                                                                                                                                                  |
-| Gmail o Google Workspace, con inicio de sesión    | `gmail`                    | Un ID de cliente OAuth de tipo _App de escritorio_ en Google Cloud con la API de Gmail activada; luego `invoicebot mail login` una vez.                                                                             |
-| Google Workspace de empresa, sin usuario          | `gmail`                    | Una cuenta de servicio con delegación de dominio y el permiso `gmail.readonly` (la configura el administrador de Workspace).                                                                                        |
-| Outlook.com o Microsoft 365, con inicio de sesión | `graph`                    | Una aplicación registrada en Microsoft Entra con el permiso delegado `Mail.Read` y flujos de cliente público; luego `invoicebot mail login` (código en microsoft.com/devicelogin).                                  |
-| Microsoft 365 de empresa, sin usuario             | `graph`                    | Una aplicación con el permiso de aplicación `Mail.Read` otorgado por el administrador (conviene limitarla al buzón de facturas con una directiva de acceso de aplicación), su client secret y el ID del directorio. |
+| Buzón                                             | `INVOICEBOT_MAIL_PROVIDER` | Qué necesitas                                                                                                                                                                        |
+| ------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Gmail personal                                    | `imap`                     | Verificación en dos pasos activada y una [contraseña de aplicación](https://myaccount.google.com/apppasswords) en `INVOICEBOT_MAIL_PASSWORD`. El servidor se deduce de la dirección. |
+| Correo de hosting (cPanel, Zimbra), Zoho, Yahoo   | `imap`                     | Servidor IMAP (`INVOICEBOT_MAIL_IMAP_HOST`), usuario y contraseña.                                                                                                                   |
+| Gmail o Google Workspace, con inicio de sesión    | `gmail`                    | Un ID de cliente OAuth de tipo _App de escritorio_ en Google Cloud con la API de Gmail activada; luego `invoicebot mail login` una vez.                                              |
+| Google Workspace de empresa, sin usuario          | `gmail`                    | Una cuenta de servicio con delegación de dominio y el permiso `gmail.readonly` (la configura el administrador de Workspace).                                                         |
+| Outlook.com o Microsoft 365, con inicio de sesión | `graph`                    | Una aplicación registrada en Microsoft Entra con el permiso delegado `Mail.Read` y flujos de cliente público; luego `invoicebot mail login` (código en microsoft.com/devicelogin).   |
+| Microsoft 365 de empresa, sin usuario             | `graph`                    | Una aplicación con permiso de aplicación limitado al buzón de facturas (RBAC para aplicaciones de Exchange), con certificado o client secret, y el ID del directorio.                |
 
 Gmail y Microsoft ya no aceptan la contraseña normal de la cuenta para leer el correo desde otra aplicación. Para las opciones con inicio de sesión, cada organización registra su propia aplicación en Google Cloud o Microsoft Entra (n8n, Zapier o Power Automate funcionan igual: la nube de esos servicios usa la aplicación que ellos registraron). `invoicebot mail login` guarda el acceso en `data/mail-token.json`: protégelo como una contraseña. Microsoft lo renueva en cada uso y InvoiceBot guarda el nuevo.
 
@@ -281,6 +281,14 @@ invoicebot mail check     # se conecta y cuenta los correos con adjuntos de los 
 invoicebot mail fetch     # descarga los adjuntos nuevos sin procesarlos
 invoicebot mail list      # últimos correos leídos y qué se hizo con cada uno
 ```
+
+**Modo empresa**: la guía para TI [docs/correo-empresa.md](docs/correo-empresa.md) explica, paso a paso, cómo dar acceso solo al buzón de facturas en Microsoft 365 (certificado y RBAC para aplicaciones) y en Google Workspace, sin usuario ni contraseña de una persona.
+
+**Ordenar el buzón** (opcional, exige permiso de escritura): con `INVOICEBOT_MAIL_PROCESSED_FOLDER=Procesado` e `INVOICEBOT_MAIL_REVIEW_FOLDER=Revisar`, cada correo leído se mueve a la carpeta (o etiqueta de Gmail) que corresponde, y la bandeja de entrada queda solo con lo pendiente. InvoiceBot nunca borra mensajes.
+
+**Trazabilidad**: cada factura recuerda de qué correo vino (remitente, asunto, fecha y buzón); se ve en `invoicebot show` y en la pantalla de revisión.
+
+> Con `gmail` en una cuenta personal, Google entrega un acceso que **vence a los 7 días** mientras la app de Google Cloud esté en modo de prueba. Para una cuenta personal es más simple `imap` con contraseña de aplicación; en Google Workspace usa una app de tipo _Interno_, que no vence.
 
 Para no leer todo el buzón, crea una carpeta o etiqueta "Facturas" con una regla que mueva allí los correos de los proveedores, y define `INVOICEBOT_MAIL_FOLDER=Facturas`.
 

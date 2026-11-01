@@ -8,6 +8,9 @@ export const GRAPH_API_URL = 'https://graph.microsoft.com/v1.0';
 export const MICROSOFT_LOGIN_URL = 'https://login.microsoftonline.com';
 /** Permiso delegado (inicio de sesión del usuario): leer su correo y renovar el acceso. */
 export const GRAPH_DELEGATED_SCOPE = 'offline_access https://graph.microsoft.com/Mail.Read';
+/** Para mover mensajes a otra carpeta. */
+export const GRAPH_DELEGATED_WRITE_SCOPE =
+  'offline_access https://graph.microsoft.com/Mail.ReadWrite';
 /** Permiso de aplicación: el que otorga el administrador de Microsoft 365 (Mail.Read). */
 export const GRAPH_APP_SCOPE = 'https://graph.microsoft.com/.default';
 const MAX_LISTED = 5000;
@@ -42,21 +45,42 @@ export function createGraphSource({
   const root = mailbox ? `${apiUrl}/users/${encodeURIComponent(mailbox)}` : `${apiUrl}/me`;
   const options = { tokens, fetchImpl, timeoutMs, service: 'Microsoft Graph' };
   let folderId: string | null = null;
+  const folders = new Map<string, string>();
 
-  /** Id de la carpeta: nombre conocido, o búsqueda por nombre en la raíz y dentro de la bandeja de entrada. */
-  async function resolveFolder(): Promise<string> {
-    if (folderId) return folderId;
-    const name = folder ?? 'inbox';
-    if (WELL_KNOWN_FOLDERS.has(name.toLowerCase())) return (folderId = name.toLowerCase());
+  /** Id de una carpeta por nombre, en la raíz o dentro de la bandeja de entrada; null si no existe. */
+  async function findFolder(name: string): Promise<string | null> {
+    if (WELL_KNOWN_FOLDERS.has(name.toLowerCase())) return name.toLowerCase();
     const filter = encodeURIComponent(`displayName eq '${name.replaceAll("'", "''")}'`);
     for (const parent of [`${root}/mailFolders`, `${root}/mailFolders/inbox/childFolders`]) {
       const found = await apiJson<{ value: { id: string }[] }>(
         `${parent}?$filter=${filter}&$select=id`,
         options,
       );
-      if (found.value[0]) return (folderId = found.value[0].id);
+      if (found.value[0]) return found.value[0].id;
     }
-    throw new MailError(`No existe la carpeta "${name}" en el buzón`);
+    return null;
+  }
+
+  /** Carpeta a leer: la bandeja de entrada o la configurada. */
+  async function resolveFolder(): Promise<string> {
+    if (folderId) return folderId;
+    const name = folder ?? 'inbox';
+    folderId = await findFolder(name);
+    if (!folderId) throw new MailError(`No existe la carpeta "${name}" en el buzón`);
+    return folderId;
+  }
+
+  /** Carpeta de destino al mover; si no existe se crea dentro de la bandeja de entrada. */
+  async function destination(name: string): Promise<string> {
+    let id = folders.get(name.toLowerCase()) ?? (await findFolder(name));
+    id ??= (
+      await apiJson<{ id: string }>(`${root}/mailFolders/inbox/childFolders`, {
+        ...options,
+        body: { displayName: name },
+      })
+    ).id;
+    folders.set(name.toLowerCase(), id);
+    return id;
   }
 
   return {
@@ -103,6 +127,13 @@ export function createGraphSource({
       const raw = Buffer.from(await res.arrayBuffer());
       if (raw.length > MAX_MESSAGE_BYTES) throw new MailError(`Mensaje ${id} demasiado grande`);
       return raw;
+    },
+
+    async move(id, target) {
+      await apiJson(`${root}/messages/${encodeURIComponent(id)}/move`, {
+        ...options,
+        body: { destinationId: await destination(target) },
+      });
     },
 
     async close() {},

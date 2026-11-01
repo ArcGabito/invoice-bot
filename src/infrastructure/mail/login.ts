@@ -25,6 +25,7 @@ export async function googleLogin({
   clientSecret,
   tokenUrl,
   authUrl = GOOGLE_AUTH_URL,
+  scope = GMAIL_SCOPE,
   openBrowser,
   print,
   fetchImpl,
@@ -34,6 +35,7 @@ export async function googleLogin({
   clientSecret: string;
   tokenUrl: string;
   authUrl?: string;
+  scope?: string;
   openBrowser: (url: string) => void;
   print: (line: string) => void;
   fetchImpl?: Fetch;
@@ -75,7 +77,7 @@ export async function googleLogin({
       client_id: clientId,
       redirect_uri: redirectUri,
       response_type: 'code',
-      scope: GMAIL_SCOPE,
+      scope,
       access_type: 'offline',
       // Pide el consentimiento siempre: Google solo entrega el refresh token la primera vez.
       prompt: 'consent',
@@ -125,6 +127,7 @@ export async function microsoftDeviceLogin({
   clientId,
   tenant,
   loginUrl = MICROSOFT_LOGIN_URL,
+  scope = GRAPH_DELEGATED_SCOPE,
   print,
   fetchImpl = globalThis.fetch,
   sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)),
@@ -132,6 +135,7 @@ export async function microsoftDeviceLogin({
   clientId: string;
   tenant: string;
   loginUrl?: string;
+  scope?: string;
   print: (line: string) => void;
   fetchImpl?: Fetch;
   sleep?: (ms: number) => Promise<unknown>;
@@ -142,7 +146,7 @@ export async function microsoftDeviceLogin({
     res = await fetchImpl(`${base}/devicecode`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: clientId, scope: GRAPH_DELEGATED_SCOPE }).toString(),
+      body: new URLSearchParams({ client_id: clientId, scope }).toString(),
     });
   } catch (error) {
     throw new MailError(`No se pudo contactar a Microsoft: ${(error as Error).message}`);

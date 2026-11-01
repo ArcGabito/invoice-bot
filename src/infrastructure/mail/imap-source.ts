@@ -36,6 +36,7 @@ export function createImapSource({
   user,
   password,
   folder = null,
+  writable = false,
   timeoutMs = 60_000,
 }: {
   host: string;
@@ -44,6 +45,8 @@ export function createImapSource({
   user: string;
   password: string;
   folder?: string | null;
+  /** Abrir la carpeta con escritura, para mover mensajes. Por defecto, solo lectura. */
+  writable?: boolean;
   timeoutMs?: number;
 }): MailSource {
   let client: ImapFlow | null = null;
@@ -84,7 +87,7 @@ export function createImapSource({
       }
       const name = folder ?? 'INBOX';
       try {
-        const mailbox = await client.mailboxOpen(name, { readOnly: true });
+        const mailbox = await client.mailboxOpen(name, { readOnly: !writable });
         uidValidity = String(mailbox.uidValidity);
       } catch (error) {
         throw new MailError(`No se pudo abrir la carpeta "${name}": ${errorMessage(error)}`, {
@@ -123,6 +126,16 @@ export function createImapSource({
       if (message.source.length > MAX_MESSAGE_BYTES)
         throw new MailError(`Mensaje ${id} demasiado grande`);
       return message.source;
+    },
+
+    async move(id, target) {
+      const [validity, uid] = id.split(':');
+      if (validity !== uidValidity || !uid) throw new MailError(`El mensaje ${id} ya no existe`);
+      const imap = open();
+      // Crea la carpeta si no existe (si ya existe, el servidor responde con error y se sigue).
+      await imap.mailboxCreate(target).catch(() => {});
+      const moved = await imap.messageMove(uid, target, { uid: true });
+      if (!moved) throw new MailError(`El servidor IMAP no movió el mensaje ${id} a "${target}"`);
     },
 
     async close() {

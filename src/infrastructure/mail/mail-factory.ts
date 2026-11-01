@@ -1,18 +1,21 @@
 import fs from 'node:fs';
 import type { Config } from '../../shared/config.ts';
 import { ConfigError } from '../../shared/errors.ts';
-import { GMAIL_SCOPE, createGmailSource } from './gmail-source.ts';
+import { GMAIL_MODIFY_SCOPE, GMAIL_SCOPE, createGmailSource } from './gmail-source.ts';
 import {
   GRAPH_APP_SCOPE,
   GRAPH_DELEGATED_SCOPE,
+  GRAPH_DELEGATED_WRITE_SCOPE,
   createGraphSource,
   microsoftTokenUrl,
 } from './graph-source.ts';
 import { createImapSource, defaultImapHost } from './imap-source.ts';
 import type { MailSource } from './mail-source.ts';
 import {
+  clientCertificateProvider,
   clientCredentialsProvider,
   googleServiceAccountProvider,
+  readCertificatePem,
   refreshTokenProvider,
 } from './oauth.ts';
 import type { GoogleServiceAccountKey } from './oauth.ts';
@@ -30,6 +33,17 @@ export interface MailEndpoints {
   graphApiUrl?: string;
   microsoftLoginUrl?: string;
   fetchImpl?: Fetch;
+}
+
+/** ¿Se ordena el buzón tras leer cada mensaje? Exige permiso de escritura. */
+export const movesMessages = (mail: Pick<Config['mail'], 'processedFolder' | 'reviewFolder'>) =>
+  Boolean(mail.processedFolder || mail.reviewFolder);
+
+/** Permisos que se piden al iniciar sesión: lectura, o lectura y escritura si se mueven mensajes. */
+export function loginScope(mail: Config['mail']): string {
+  const write = movesMessages(mail);
+  if (mail.provider === 'gmail') return write ? GMAIL_MODIFY_SCOPE : GMAIL_SCOPE;
+  return write ? GRAPH_DELEGATED_WRITE_SCOPE : GRAPH_DELEGATED_SCOPE;
 }
 
 function needs(values: [string, unknown][], what: string): void {
@@ -70,6 +84,7 @@ export function createMailSource(
 ): MailSource {
   const { mail } = config;
   const { fetchImpl } = endpoints;
+  const write = movesMessages(mail);
   switch (mail.provider) {
     case 'none':
       throw new ConfigError(
@@ -93,6 +108,7 @@ export function createMailSource(
         user: mail.user!,
         password: env.INVOICEBOT_MAIL_PASSWORD ?? '',
         folder: mail.folder,
+        writable: write,
         timeoutMs: mail.timeoutMs,
       });
     }
@@ -100,6 +116,7 @@ export function createMailSource(
     case 'gmail': {
       const common = {
         label: mail.folder,
+        inboxOnly: write,
         timeoutMs: mail.timeoutMs,
         fetchImpl,
         ...(endpoints.gmailApiUrl && { apiUrl: endpoints.gmailApiUrl }),
@@ -122,7 +139,7 @@ export function createMailSource(
           tokens: googleServiceAccountProvider({
             key,
             subject: mail.user!,
-            scope: GMAIL_SCOPE,
+            scope: write ? GMAIL_MODIFY_SCOPE : GMAIL_SCOPE,
             fetchImpl,
             timeoutMs: mail.timeoutMs,
           }),
@@ -150,7 +167,7 @@ export function createMailSource(
     }
 
     case 'graph': {
-      const { clientId, tenant, clientSecretSet } = mail.microsoft;
+      const { clientId, tenant, clientSecretSet, certFile } = mail.microsoft;
       needs([['INVOICEBOT_MAIL_MS_CLIENT_ID', clientId]], 'Microsoft 365 / Outlook');
       const tokenUrl = microsoftTokenUrl(tenant, endpoints.microsoftLoginUrl);
       const common = {
@@ -160,12 +177,40 @@ export function createMailSource(
         ...(endpoints.graphApiUrl && { apiUrl: endpoints.graphApiUrl }),
       };
       // Microsoft 365 de empresa: permiso de aplicación otorgado por el administrador.
-      if (clientSecretSet) {
+      if (clientSecretSet || certFile) {
         needs([['INVOICEBOT_MAIL_USER', mail.user]], 'Microsoft 365 con permiso de aplicación');
         if (['common', 'organizations', 'consumers'].includes(tenant.toLowerCase())) {
           throw new ConfigError(
-            'Con INVOICEBOT_MAIL_MS_CLIENT_SECRET (permiso de aplicación) define INVOICEBOT_MAIL_MS_TENANT con el ID del directorio de la empresa.',
+            'Con permiso de aplicación (client secret o certificado) define INVOICEBOT_MAIL_MS_TENANT con el ID del directorio de la empresa.',
           );
+        }
+        if (certFile) {
+          let pem: string;
+          try {
+            pem = fs.readFileSync(certFile, 'utf8');
+          } catch (error) {
+            throw new ConfigError(
+              `No se pudo leer el certificado ${certFile}: ${(error as Error).message}`,
+            );
+          }
+          let certificate: ReturnType<typeof readCertificatePem>;
+          try {
+            certificate = readCertificatePem(pem, env.INVOICEBOT_MAIL_MS_CERT_PASSPHRASE);
+          } catch (error) {
+            throw new ConfigError(`INVOICEBOT_MAIL_MS_CERT_FILE: ${(error as Error).message}`);
+          }
+          return createGraphSource({
+            ...common,
+            mailbox: mail.user,
+            tokens: clientCertificateProvider({
+              tokenUrl,
+              clientId: clientId!,
+              certificate,
+              scope: GRAPH_APP_SCOPE,
+              fetchImpl,
+              timeoutMs: mail.timeoutMs,
+            }),
+          });
         }
         return createGraphSource({
           ...common,
@@ -188,7 +233,7 @@ export function createMailSource(
           tokenUrl,
           clientId: clientId!,
           refreshToken: storedRefreshToken(mail, 'graph', clientId!, env),
-          scope: GRAPH_DELEGATED_SCOPE,
+          scope: write ? GRAPH_DELEGATED_WRITE_SCOPE : GRAPH_DELEGATED_SCOPE,
           // Microsoft renueva el refresh token en cada uso: se guarda el nuevo.
           onRotate: (refreshToken) =>
             writeMailToken(mail.tokenFile, {

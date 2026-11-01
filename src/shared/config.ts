@@ -73,6 +73,13 @@ const ConfigSchema = z.object({
     dir: z.string().min(1).nullable(),
     /** Carpeta o etiqueta a leer. null = bandeja de entrada (Gmail: todo menos spam y papelera). */
     folder: z.string().min(1).nullable(),
+    /**
+     * Ordenar el buzón tras leer cada mensaje: con comprobantes se mueve a
+     * `processedFolder`; sin comprobantes, a `reviewFolder`. null = no se
+     * mueve (solo lectura). Mover exige permiso de escritura en el buzón.
+     */
+    processedFolder: z.string().min(1).nullable(),
+    reviewFolder: z.string().min(1).nullable(),
     /** Ventana de búsqueda: mensajes recibidos en los últimos N días. */
     sinceDays: z.int().min(1).max(365),
     /** Máximo de mensajes nuevos por ciclo (el resto, en el siguiente). */
@@ -90,13 +97,19 @@ const ConfigSchema = z.object({
       /** Cuenta de servicio con delegación de dominio (Google Workspace): JSON de la clave. */
       serviceAccountFile: z.string().min(1).nullable(),
     }),
-    microsoft: z.object({
-      /** ID del directorio (tenant). common: cuentas personales y de empresa con inicio de sesión. */
-      tenant: z.string().regex(/^[A-Za-z0-9.-]+$/, 'ID de directorio o dominio'),
-      clientId: z.string().min(1).nullable(),
-      /** Con client secret: permiso de aplicación (sin usuario); sin él: inicio de sesión del usuario. */
-      clientSecretSet: z.boolean(),
-    }),
+    microsoft: z
+      .object({
+        /** ID del directorio (tenant). common: cuentas personales y de empresa con inicio de sesión. */
+        tenant: z.string().regex(/^[A-Za-z0-9.-]+$/, 'ID de directorio o dominio'),
+        clientId: z.string().min(1).nullable(),
+        /** Con client secret o certificado: permiso de aplicación (sin usuario); sin ellos: inicio de sesión del usuario. */
+        clientSecretSet: z.boolean(),
+        /** Certificado de la aplicación (PEM con certificado y clave privada), en vez de client secret. */
+        certFile: z.string().min(1).nullable(),
+      })
+      .refine((m) => !(m.clientSecretSet && m.certFile), {
+        message: 'usa INVOICEBOT_MAIL_MS_CLIENT_SECRET o INVOICEBOT_MAIL_MS_CERT_FILE, no ambos',
+      }),
     refreshTokenSet: z.boolean(),
     /** Token guardado por `invoicebot mail login`. */
     tokenFile: z.string().min(1),
@@ -290,6 +303,8 @@ export function loadConfig({
       passwordSet: Boolean(env.INVOICEBOT_MAIL_PASSWORD),
       dir: fileFrom(env.INVOICEBOT_MAIL_DIR),
       folder: env.INVOICEBOT_MAIL_FOLDER || null,
+      processedFolder: env.INVOICEBOT_MAIL_PROCESSED_FOLDER || null,
+      reviewFolder: env.INVOICEBOT_MAIL_REVIEW_FOLDER || null,
       sinceDays: intFrom(env.INVOICEBOT_MAIL_SINCE_DAYS, 7),
       maxMessages: intFrom(env.INVOICEBOT_MAIL_MAX_MESSAGES, 200),
       timeoutMs: intFrom(env.INVOICEBOT_MAIL_TIMEOUT_MS, 60_000),
@@ -307,6 +322,7 @@ export function loadConfig({
         tenant: env.INVOICEBOT_MAIL_MS_TENANT || 'common',
         clientId: env.INVOICEBOT_MAIL_MS_CLIENT_ID || null,
         clientSecretSet: Boolean(env.INVOICEBOT_MAIL_MS_CLIENT_SECRET),
+        certFile: fileFrom(env.INVOICEBOT_MAIL_MS_CERT_FILE),
       },
       refreshTokenSet: Boolean(env.INVOICEBOT_MAIL_REFRESH_TOKEN),
       tokenFile: path.join(dataDir, 'mail-token.json'),

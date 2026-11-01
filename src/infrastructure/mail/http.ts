@@ -8,7 +8,8 @@ export type Fetch = typeof globalThis.fetch;
 const MAX_RETRY_WAIT_MS = 10_000;
 
 /**
- * GET autenticado a una API de correo (Gmail o Graph). Reintenta una vez si
+ * Petición autenticada a una API de correo (Gmail o Graph): GET, o POST con
+ * `body` en JSON. Reintenta una vez si
  * el servicio pide esperar (429/503) y traduce los errores a MailError.
  */
 export async function apiGet(
@@ -18,13 +19,25 @@ export async function apiGet(
     fetchImpl = globalThis.fetch,
     timeoutMs,
     service,
-  }: { tokens: TokenProvider; fetchImpl?: Fetch; timeoutMs: number; service: string },
+    body,
+  }: {
+    tokens: TokenProvider;
+    fetchImpl?: Fetch;
+    timeoutMs: number;
+    service: string;
+    body?: unknown;
+  },
 ): Promise<Response> {
   for (let attempt = 1; ; attempt++) {
     let res: Response;
     try {
       res = await fetchImpl(url, {
-        headers: { authorization: `Bearer ${await tokens.getToken()}` },
+        method: body === undefined ? 'GET' : 'POST',
+        headers: {
+          authorization: `Bearer ${await tokens.getToken()}`,
+          ...(body !== undefined && { 'content-type': 'application/json' }),
+        },
+        ...(body !== undefined && { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
@@ -63,5 +76,7 @@ export async function apiGet(
 }
 
 export async function apiJson<T>(url: string, options: Parameters<typeof apiGet>[1]): Promise<T> {
-  return (await (await apiGet(url, options)).json()) as T;
+  // Algunas respuestas correctas no traen contenido (204).
+  const text = await (await apiGet(url, options)).text();
+  return (text ? JSON.parse(text) : {}) as T;
 }
