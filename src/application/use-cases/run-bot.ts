@@ -10,9 +10,16 @@ import type { Deps } from '../deps.ts';
 import { errorMessage } from '../../shared/errors.ts';
 import { saveExchangeRates } from './exchange-rates.ts';
 import type { ExchangeRateSource } from '../../infrastructure/fx/sunat-exchange-rate.ts';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fetchMail } from './fetch-mail.ts';
+import type { MailSummary } from './fetch-mail.ts';
+import type { MailSource } from '../../infrastructure/mail/mail-source.ts';
 
 export interface BotReport {
   inboxDir: string;
+  /** Comprobantes descargados del correo a la carpeta de entrada. */
+  mail: MailSummary | { error: string } | null;
   retry: RetrySummary | null;
   scan: ScanSummary | null;
   sunat: SunatSummary | { error: string } | null;
@@ -39,16 +46,18 @@ export function currentAndPreviousMonth(today: string): [string, string] {
 
 /**
  * Un ciclo completo del bot desatendido:
- * 1. Reintenta los documentos que fallaron en ejecuciones anteriores
+ * 1. Descarga los comprobantes adjuntos de los correos nuevos, si hay un
+ *    buzón configurado, y el tipo de cambio del día.
+ * 2. Reintenta los documentos que fallaron en ejecuciones anteriores
  *    (errores temporales, dentro del límite de intentos).
- * 2. Escanea la carpeta de entrada.
- * 3. Verifica en SUNAT, si está activado.
- * 4. Exporta el mes actual y el anterior, si está configurado (las facturas
+ * 3. Escanea la carpeta de entrada.
+ * 4. Verifica en SUNAT, si está activado.
+ * 5. Exporta el mes actual y el anterior, si está configurado (las facturas
  *    de fin de mes llegan durante los primeros días del siguiente).
- * 5. Hace una copia de seguridad si la última es más antigua que el intervalo.
+ * 6. Hace una copia de seguridad si la última es más antigua que el intervalo.
  *
  * Cada ciclo queda registrado en bot_runs. Un fallo en la verificación de
- * SUNAT o en un documento no detiene el ciclo: lo marca como parcial.
+ * SUNAT, del correo o en un documento no detiene el ciclo: lo marca como parcial.
  */
 export async function runBot({
   deps,
@@ -57,6 +66,7 @@ export async function runBot({
   trigger = 'manual',
   sunatClient = null,
   exchangeRates = null,
+  mail = null,
   exportFormat = 'none',
   backup = null,
   host = null,
@@ -68,6 +78,8 @@ export async function runBot({
   trigger?: string;
   sunatClient?: Pick<SunatClient, 'validateReceipt'> | null;
   exchangeRates?: ExchangeRateSource | null;
+  /** Buzón y carpeta (dentro de la de entrada) donde se guardan los adjuntos. */
+  mail?: { source: MailSource; dir: string } | null;
   exportFormat?: string;
   backup?: BackupStep | null;
   host?: string | null;
@@ -86,6 +98,7 @@ export async function runBot({
 
   const report: BotReport = {
     inboxDir,
+    mail: null,
     retry: null,
     scan: null,
     sunat: null,
@@ -97,6 +110,15 @@ export async function runBot({
   let exitCode = 0;
   let error: string | null = null;
   try {
+    // Primero el correo: los adjuntos quedan en la carpeta de entrada y se escanean en este mismo ciclo.
+    if (mail) {
+      try {
+        report.mail = await fetchMail({ deps, source: mail.source, dir: mail.dir });
+      } catch (mailError) {
+        report.mail = { error: errorMessage(mailError) };
+        log.error({ err: { message: report.mail.error } }, 'no se pudo leer el correo');
+      }
+    }
     // Antes de escanear: las facturas nuevas en dólares ya encuentran el tipo de cambio del día.
     // Un fallo de SUNAT no detiene el ciclo: esas facturas quedan con la advertencia FX_RATE_MISSING.
     if (exchangeRates) {
@@ -111,7 +133,15 @@ export async function runBot({
     }
     const retry = await retryDocuments({ deps, failed: true, pending: false });
     report.retry = retry;
-    const scan = await scanInvoices({ root: inboxDir, recursive, deps });
+    let scan = await scanInvoices({ root: inboxDir, recursive, deps });
+    // Adjuntos guardados fuera de la carpeta de entrada (p. ej. en Docker, donde es de solo lectura).
+    if (mail && !(recursive && isInside(mail.dir, inboxDir))) {
+      fs.mkdirSync(mail.dir, { recursive: true });
+      scan = mergeScanSummaries(
+        scan,
+        await scanInvoices({ root: mail.dir, recursive: true, deps }),
+      );
+    }
     report.scan = scan;
 
     if (sunatClient) {
@@ -133,6 +163,7 @@ export async function runBot({
       scan.failed > 0 ||
       scan.error > 0 ||
       retry.failed > 0 ||
+      (report.mail !== null && ('error' in report.mail || report.mail.failed > 0)) ||
       (sunat !== null && ('error' in sunat || hasSunatProblems(sunat)));
     if (problems) {
       status = 'partial';
@@ -156,6 +187,23 @@ export async function runBot({
   return { runId, status, exitCode, report, ...(error !== null && { error }) };
 }
 
+function isInside(dir: string, parent: string): boolean {
+  const rel = path.relative(path.resolve(parent), path.resolve(dir));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/** Suma dos resúmenes de escaneo (carpeta de entrada + carpeta del correo). */
+export function mergeScanSummaries(a: ScanSummary, b: ScanSummary): ScanSummary {
+  const merged = { ...a };
+  for (const key of Object.keys(a) as (keyof ScanSummary)[]) {
+    const x = a[key];
+    const y = b[key];
+    (merged as Record<string, unknown>)[key] =
+      Array.isArray(x) && Array.isArray(y) ? [...x, ...y] : (x as number) + (y as number);
+  }
+  return merged;
+}
+
 /** Lo esencial de un ciclo, para guardar en bot_runs sin listas largas. */
 export function compactReport(report: BotReport) {
   const s = report.scan;
@@ -173,6 +221,8 @@ export function compactReport(report: BotReport) {
     retryFailed: report.retry?.failed ?? 0,
     sunatChecked: sunat && 'checked' in sunat ? sunat.checked : null,
     sunatError: sunat && 'error' in sunat ? sunat.error : null,
+    mailFiles: report.mail && 'files' in report.mail ? report.mail.files : null,
+    mailError: report.mail && 'error' in report.mail ? report.mail.error : null,
     fxRate: report.fx && 'sell' in report.fx ? report.fx.sell : null,
     fxError: report.fx && 'error' in report.fx ? report.fx.error : null,
     exports: report.exports.map((e) => e.path),

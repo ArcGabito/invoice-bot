@@ -323,4 +323,32 @@ const detractionAndExchange: Migration = {
   ],
 };
 
-export const MIGRATIONS: Migration[] = [initial, detractionAndExchange];
+/** Correos leídos por el conector de correo: cada mensaje se descarga una sola vez. */
+const mailMessages: Migration = {
+  version: 3,
+  name: '003_mail_messages',
+  batches: [
+    `CREATE TABLE mail_messages (
+      id             INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_mail_messages PRIMARY KEY,
+      -- Buzón: "gmail:ana@empresa.pe", "imap:facturas@empresa.pe", "graph:facturas@empresa.pe".
+      account        NVARCHAR(320)  NOT NULL,
+      -- Identificador del mensaje en el servidor de correo (no el Message-ID del encabezado).
+      message_id     NVARCHAR(400)  NOT NULL,
+      received_at    DATETIME2(3)   NULL,
+      sender         NVARCHAR(320)  NULL,
+      subject        NVARCHAR(500)  NULL,
+      status         NVARCHAR(20)   NOT NULL
+        CONSTRAINT ck_mail_messages_status CHECK (status IN (N'saved', N'no_attachments', N'failed')),
+      -- Archivos guardados en la carpeta de entrada (adjuntos y contenido de ZIP).
+      files          INT            NOT NULL CONSTRAINT df_mail_messages_files DEFAULT 0,
+      folder         NVARCHAR(400)  NULL,
+      attempts       INT            NOT NULL CONSTRAINT df_mail_messages_attempts DEFAULT 1,
+      error_message  NVARCHAR(MAX)  NULL,
+      created_at     DATETIME2(3)   NOT NULL CONSTRAINT df_mail_messages_created DEFAULT SYSUTCDATETIME(),
+      updated_at     DATETIME2(3)   NOT NULL CONSTRAINT df_mail_messages_updated DEFAULT SYSUTCDATETIME(),
+      CONSTRAINT uq_mail_messages UNIQUE (account, message_id)
+    )`,
+  ],
+};
+
+export const MIGRATIONS: Migration[] = [initial, detractionAndExchange, mailMessages];

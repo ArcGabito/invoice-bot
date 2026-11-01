@@ -9,6 +9,7 @@ import { createBackup, isBackupDue } from '../../infrastructure/database/backup.
 import { LockedError, acquireLock } from '../../infrastructure/runtime/lock.ts';
 import { exchangeRateSourceFromConfig } from '../../infrastructure/fx/sunat-exchange-rate.ts';
 import { ConfigError, EXIT_CODES } from '../../shared/errors.ts';
+import { loadMailSource, mailDir, printMailSummary } from './mail.ts';
 import type { Printer } from '../output.ts';
 import type { Runner } from '../index.ts';
 
@@ -27,7 +28,7 @@ export function registerRun(program: Command, run: Runner): void {
   program
     .command('run')
     .description(
-      'Ejecución desatendida: reintenta, escanea la carpeta de entrada, verifica, exporta y respalda',
+      'Ejecución desatendida: lee el correo, reintenta, escanea la carpeta de entrada, verifica, exporta y respalda',
     )
     .option('--inbox <ruta>', 'carpeta de entrada (por defecto: INVOICEBOT_INBOX_DIR)')
     .option('--watch', 'repite el ciclo cada --interval minutos hasta detenerlo (Ctrl+C)', false)
@@ -69,6 +70,14 @@ export function registerRun(program: Command, run: Runner): void {
           // Si la verificación automática está activada, se valida su configuración antes de empezar.
           const sunatClient =
             config.sunat.enabled && config.sunat.verifyOnScan ? ctx.sunatClient : null;
+          // Con un buzón configurado, sus credenciales se validan antes de empezar.
+          const mail =
+            config.mail.provider === 'none'
+              ? null
+              : {
+                  source: await loadMailSource(config),
+                  dir: config.mail.dir ?? mailDir(config, inboxDir),
+                };
           const backup: BackupStep = {
             isDue: () => isBackupDue(ctx.db, config.backup.intervalHours),
             create: () =>
@@ -81,6 +90,7 @@ export function registerRun(program: Command, run: Runner): void {
               recursive: config.run.recursive,
               trigger,
               sunatClient,
+              mail,
               exchangeRates: config.fx.sunat ? exchangeRateSourceFromConfig(config) : null,
               exportFormat: config.run.export,
               backup,
@@ -148,6 +158,7 @@ function printCycle(out: Printer, { runId, status, report, error }: CycleResult)
     out.line(`  Error: ${error ?? 'el ciclo no terminó'}`);
     return;
   }
+  if (report.mail) printMailSummary(out, report.mail, '  ');
   if (report.retry.queued) {
     out.line(`  Reintentados: ${report.retry.queued} (fallidos de nuevo: ${report.retry.failed})`);
   }

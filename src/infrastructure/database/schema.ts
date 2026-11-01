@@ -167,6 +167,23 @@ export interface ExchangeRatesTable {
   updated_at: Timestamp;
 }
 
+export interface MailMessagesTable {
+  id: Generated<number>;
+  account: string;
+  message_id: string;
+  received_at: string | null;
+  sender: string | null;
+  subject: string | null;
+  /** saved (adjuntos guardados), no_attachments (sin comprobantes) o failed (se reintenta). */
+  status: string;
+  files: Generated<number>;
+  folder: string | null;
+  attempts: Generated<number>;
+  error_message: string | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 export interface SchemaMigrationsTable {
   version: number;
   name: string;
@@ -185,6 +202,7 @@ export interface Database {
   users: UsersTable;
   review_sessions: ReviewSessionsTable;
   exchange_rates: ExchangeRatesTable;
+  mail_messages: MailMessagesTable;
   schema_migrations: SchemaMigrationsTable;
 }
 
@@ -196,4 +214,5 @@ export type ReviewActionRow = Selectable<ReviewActionsTable>;
 export type BotRunRow = Selectable<BotRunsTable>;
 export type UserRow = Selectable<UsersTable>;
 export type ExchangeRateRow = Selectable<ExchangeRatesTable>;
+export type MailMessageRow = Selectable<MailMessagesTable>;
 export type NewExtractionRun = Insertable<ExtractionRunsTable>;

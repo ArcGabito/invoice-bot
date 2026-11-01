@@ -10,6 +10,7 @@ import type {
   Database,
   DocumentRow,
   ExchangeRateRow,
+  MailMessageRow,
   ExtractionRunRow,
   InvoiceDataColumns,
   InvoiceRow,
@@ -566,6 +567,62 @@ export class InvoiceRepository {
         updated_at: utcNow,
       })
       .where('id', '=', invoiceId)
+      .execute();
+  }
+
+  // --- Correo --------------------------------------------------------------
+
+  /** Mensajes ya registrados de un buzón, entre los indicados. */
+  async findMailMessages(
+    account: string,
+    messageIds: readonly string[],
+  ): Promise<Map<string, Pick<MailMessageRow, 'status' | 'attempts'>>> {
+    const found = new Map<string, Pick<MailMessageRow, 'status' | 'attempts'>>();
+    // SQL Server admite hasta 2100 parámetros por consulta.
+    for (let i = 0; i < messageIds.length; i += 500) {
+      const rows = await this.db
+        .selectFrom('mail_messages')
+        .select(['message_id', 'status', 'attempts'])
+        .where('account', '=', account)
+        .where('message_id', 'in', messageIds.slice(i, i + 500))
+        .execute();
+      for (const r of rows) found.set(r.message_id, { status: r.status, attempts: r.attempts });
+    }
+    return found;
+  }
+
+  /** Registra el resultado de leer un mensaje; si falló antes, suma un intento. */
+  async recordMailMessage(m: {
+    account: string;
+    messageId: string;
+    receivedAt: string | null;
+    sender: string | null;
+    subject: string | null;
+    status: 'saved' | 'no_attachments' | 'failed';
+    files: number;
+    folder: string | null;
+    errorMessage: string | null;
+  }): Promise<void> {
+    await sql`
+      MERGE mail_messages WITH (HOLDLOCK) AS t
+      USING (SELECT ${m.account} AS account, ${m.messageId} AS message_id) AS s
+        ON t.account = s.account AND t.message_id = s.message_id
+      WHEN MATCHED THEN
+        UPDATE SET status = ${m.status}, files = ${m.files}, folder = ${m.folder},
+          sender = ${m.sender}, subject = ${m.subject}, received_at = ${m.receivedAt},
+          error_message = ${m.errorMessage}, attempts = t.attempts + 1, updated_at = SYSUTCDATETIME()
+      WHEN NOT MATCHED THEN
+        INSERT (account, message_id, received_at, sender, subject, status, files, folder, error_message)
+        VALUES (${m.account}, ${m.messageId}, ${m.receivedAt}, ${m.sender}, ${m.subject},
+          ${m.status}, ${m.files}, ${m.folder}, ${m.errorMessage});`.execute(this.db);
+  }
+
+  async listMailMessages({ limit = 20 }: { limit?: number } = {}): Promise<MailMessageRow[]> {
+    return this.db
+      .selectFrom('mail_messages')
+      .selectAll()
+      .top(limit)
+      .orderBy('id', 'desc')
       .execute();
   }
 

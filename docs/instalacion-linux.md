@@ -85,6 +85,14 @@ INVOICEBOT_INBOX_HOST_DIR=/srv/facturas
 INVOICEBOT_EXPORT_HOST_DIR=./exports
 INVOICEBOT_RUN_EXPORT=xlsx
 
+# Correo (opcional; ver «Lectura de correo» en el README). Ejemplo: Microsoft 365
+# con permiso de aplicación sobre el buzón de facturas.
+# INVOICEBOT_MAIL_PROVIDER=graph
+# INVOICEBOT_MAIL_MS_TENANT=<ID del directorio>
+# INVOICEBOT_MAIL_MS_CLIENT_ID=...
+# INVOICEBOT_MAIL_MS_CLIENT_SECRET=...
+# INVOICEBOT_MAIL_USER=facturas@empresa.pe
+
 # Pantalla de revisión (HTTPS obligatorio en red; el certificado va en ./tls)
 INVOICEBOT_SERVE_TLS_PFX=/app/tls/revision.pfx
 INVOICEBOT_SERVE_TLS_PASSPHRASE=...
@@ -168,8 +176,11 @@ Todos los comandos de la CLI se ejecutan con `docker compose run --rm bot <coman
 | Copias de seguridad           | Automáticas cada 24 h en el volumen `sqlserver-backups`, verificadas, se conservan las 14 últimas. `docker compose run --rm bot backup --list` |
 | Sacar una copia del servidor  | `docker compose cp sqlserver:/var/opt/mssql/backup/<archivo>.bak .` y llévala fuera de la VM                                                   |
 | Cambiar la clave de Anthropic | Edita `.env` y `docker compose up -d` (recrea los contenedores con el valor nuevo)                                                             |
+| Correo                        | `docker compose run --rm bot mail check` · `mail list`. Los adjuntos quedan en el volumen de datos (`/app/data/correo`)                        |
 | Renovar el certificado        | Reemplaza el archivo en `./tls` y `docker compose restart review`                                                                              |
 | Reinicio de la VM             | Los servicios vuelven solos. Las sesiones de la pantalla se cierran y cada persona vuelve a entrar                                             |
+
+**Iniciar sesión en el correo desde Docker**: con Microsoft, `docker compose run --rm bot mail login` muestra un código para escribir en microsoft.com/devicelogin desde cualquier navegador. Con Gmail el inicio de sesión necesita un navegador en el mismo equipo: haz `invoicebot mail login` en un PC con la misma configuración y copia `data/mail-token.json` al volumen de datos (`docker compose cp mail-token.json bot:/app/data/`), o pon su `refreshToken` en `INVOICEBOT_MAIL_REFRESH_TOKEN`.
 
 **Las copias no salen de la VM por sí solas**: el volumen `sqlserver-backups` está en el mismo disco que la base de datos. Programa en el anfitrión una copia de esa carpeta (`docker volume inspect invoicebot_sqlserver-backups` muestra su ruta) a otro servidor o a almacenamiento externo.
 

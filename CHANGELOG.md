@@ -12,10 +12,16 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - Comandos `invoicebot fx fetch`, `fx set`, `fx import` (CSV) y `fx list`. Los tipos de cambio cargados a mano o por CSV no se reemplazan con la descarga de SUNAT.
 - Columnas nuevas al final del CSV y del Excel: `detraction_code`, `detraction_percent`, `detraction_amount`, `detraction_account`, `exchange_rate`, `exchange_rate_date`, `total_pen` y `net_payable`. La vista `v_invoices` también las incluye.
 - Corregir la fecha de emisión o la moneda de una factura vuelve a buscar su tipo de cambio.
+- **Lectura de correo**: `invoicebot run` descarga los comprobantes adjuntos (XML, PDF, fotos y el contenido de los ZIP) de los correos nuevos y los procesa en el mismo ciclo. Tres conectores de solo lectura, configurables en `.env` (`INVOICEBOT_MAIL_*`):
+  - `imap`: Gmail con contraseña de aplicación, correo de hosting, Zoho o Yahoo.
+  - `gmail`: API de Gmail con inicio de sesión del usuario, o cuenta de servicio con delegación de dominio en Google Workspace.
+  - `graph`: Microsoft Graph para Outlook.com y Microsoft 365, con inicio de sesión del usuario (código de dispositivo) o permiso de aplicación.
+- Comandos `invoicebot mail login`, `mail check`, `mail fetch` y `mail list`. Tabla `mail_messages`: cada mensaje se lee una vez y los que fallan se reintentan hasta `INVOICEBOT_MAX_ATTEMPTS`. Si el servidor rechaza las credenciales, el ciclo sigue y queda como parcial.
+- Docker Compose guarda los adjuntos en el volumen de datos (`INVOICEBOT_MAIL_DIR=/app/data/correo`), porque la carpeta de entrada se monta como solo lectura; `run` escanea esa carpeta también.
 
 ### Cambiado
 
-- Migración 2 del esquema (se aplica con `invoicebot db migrate`, con copia previa automática).
+- Migraciones 2 (detracciones y tipo de cambio) y 3 (correos leídos) del esquema (se aplican con `invoicebot db migrate`, con copia previa automática).
 - Versiones: reglas de validación `2026.10.3`, prompt `invoice-extraction/2026-10-31.3`, lector UBL `ubl-2.1-sunat/2026-10-31.1`.
 - La fecha de vencimiento del XML se toma de cualquier término de pago que la tenga, no solo del primero.
 

@@ -21,7 +21,7 @@ function parsePort(value: string): number {
 }
 
 /** Abre la URL en el navegador predeterminado del sistema. */
-function openBrowser(url: string): void {
+export function openBrowser(url: string): void {
   const [cmd, args]: [string, string[]] =
     process.platform === 'win32'
       ? ['cmd', ['/c', 'start', '""', url]]

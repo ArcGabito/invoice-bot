@@ -55,6 +55,52 @@ const ConfigSchema = z.object({
     sunatUrl: z.url().nullable(),
     timeoutMs: z.int().min(1000).max(120_000),
   }),
+  /**
+   * Lectura de comprobantes desde un buzón de correo. Solo lectura: no se
+   * borran, mueven ni marcan mensajes. Los secretos (contraseña, client
+   * secret, refresh token) no se copian aquí: los lee el conector al conectar.
+   */
+  mail: z.object({
+    /** imap (Gmail con contraseña de aplicación, hosting, Zoho…), gmail (API de Gmail) o graph (Microsoft 365 / Outlook). */
+    provider: z.enum(['none', 'imap', 'gmail', 'graph']),
+    /** Buzón: dirección de correo (IMAP: usuario; Gmail con cuenta de servicio y Graph de aplicación: buzón a leer). */
+    user: z.string().min(1).nullable(),
+    passwordSet: z.boolean(),
+    /**
+     * Carpeta donde se guardan los adjuntos. null = "correo" dentro de la
+     * carpeta de entrada. Si está fuera de ella, `run` la escanea también.
+     */
+    dir: z.string().min(1).nullable(),
+    /** Carpeta o etiqueta a leer. null = bandeja de entrada (Gmail: todo menos spam y papelera). */
+    folder: z.string().min(1).nullable(),
+    /** Ventana de búsqueda: mensajes recibidos en los últimos N días. */
+    sinceDays: z.int().min(1).max(365),
+    /** Máximo de mensajes nuevos por ciclo (el resto, en el siguiente). */
+    maxMessages: z.int().min(1).max(5000),
+    timeoutMs: z.int().min(5000).max(600_000),
+    imap: z.object({
+      host: z.string().min(1).nullable(),
+      port: z.int().min(1).max(65535),
+      /** TLS directo (puerto 993). false: STARTTLS si el servidor lo ofrece (puerto 143). */
+      tls: z.boolean({ error: 'usa true o false' }),
+    }),
+    google: z.object({
+      clientId: z.string().min(1).nullable(),
+      clientSecretSet: z.boolean(),
+      /** Cuenta de servicio con delegación de dominio (Google Workspace): JSON de la clave. */
+      serviceAccountFile: z.string().min(1).nullable(),
+    }),
+    microsoft: z.object({
+      /** ID del directorio (tenant). common: cuentas personales y de empresa con inicio de sesión. */
+      tenant: z.string().regex(/^[A-Za-z0-9.-]+$/, 'ID de directorio o dominio'),
+      clientId: z.string().min(1).nullable(),
+      /** Con client secret: permiso de aplicación (sin usuario); sin él: inicio de sesión del usuario. */
+      clientSecretSet: z.boolean(),
+    }),
+    refreshTokenSet: z.boolean(),
+    /** Token guardado por `invoicebot mail login`. */
+    tokenFile: z.string().min(1),
+  }),
   dataDir: z.string().min(1),
   /**
    * Base de datos SQL Server. La contraseña (INVOICEBOT_DB_PASSWORD) no se
@@ -237,6 +283,33 @@ export function loadConfig({
       sunat: boolFrom(env.INVOICEBOT_FX_SUNAT, true),
       sunatUrl: env.INVOICEBOT_FX_SUNAT_URL || null,
       timeoutMs: intFrom(env.INVOICEBOT_FX_TIMEOUT_MS, 20_000),
+    },
+    mail: {
+      provider: (env.INVOICEBOT_MAIL_PROVIDER || 'none').toLowerCase(),
+      user: env.INVOICEBOT_MAIL_USER || null,
+      passwordSet: Boolean(env.INVOICEBOT_MAIL_PASSWORD),
+      dir: fileFrom(env.INVOICEBOT_MAIL_DIR),
+      folder: env.INVOICEBOT_MAIL_FOLDER || null,
+      sinceDays: intFrom(env.INVOICEBOT_MAIL_SINCE_DAYS, 7),
+      maxMessages: intFrom(env.INVOICEBOT_MAIL_MAX_MESSAGES, 200),
+      timeoutMs: intFrom(env.INVOICEBOT_MAIL_TIMEOUT_MS, 60_000),
+      imap: {
+        host: env.INVOICEBOT_MAIL_IMAP_HOST || null,
+        port: intFrom(env.INVOICEBOT_MAIL_IMAP_PORT, 993),
+        tls: boolFrom(env.INVOICEBOT_MAIL_IMAP_TLS, true),
+      },
+      google: {
+        clientId: env.INVOICEBOT_MAIL_GOOGLE_CLIENT_ID || null,
+        clientSecretSet: Boolean(env.INVOICEBOT_MAIL_GOOGLE_CLIENT_SECRET),
+        serviceAccountFile: fileFrom(env.INVOICEBOT_MAIL_GOOGLE_SERVICE_ACCOUNT_FILE),
+      },
+      microsoft: {
+        tenant: env.INVOICEBOT_MAIL_MS_TENANT || 'common',
+        clientId: env.INVOICEBOT_MAIL_MS_CLIENT_ID || null,
+        clientSecretSet: Boolean(env.INVOICEBOT_MAIL_MS_CLIENT_SECRET),
+      },
+      refreshTokenSet: Boolean(env.INVOICEBOT_MAIL_REFRESH_TOKEN),
+      tokenFile: path.join(dataDir, 'mail-token.json'),
     },
     dataDir,
     db: {

@@ -19,6 +19,7 @@
   "type": "module",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/mailparser": "^3.9.0",
     "@types/node": "^26.6.5",
     "eslint": "^10.13.0",
     "globals": "^17.13.0",
@@ -43,7 +44,10 @@
     "csv-stringify": "^6.9.0",
     "dotenv": "^18.0.9",
     "fast-xml-parser": "^5.11.2",
+    "fflate": "^0.8.3",
+    "imapflow": "^2.10.0",
     "kysely": "^0.29.7",
+    "mailparser": "^3.14.1",
     "pdfjs-dist": "^6.4.299",
     "pino": "^10.4.0",
     "tarn": "^3.1.2",

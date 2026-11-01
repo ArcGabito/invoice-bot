@@ -33,6 +33,7 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 | Docker Compose (bot, pantalla de revisión y SQL Server) para servidores Linux                          | ✅     |
 | Detracciones (SPOT): lectura del XML, tasa de SUNAT por código, monto y neto a pagar                   | ✅     |
 | Tipo de cambio de SUNAT: facturas en dólares registradas en soles                                      | ✅     |
+| Lectura de correo: IMAP, Gmail / Google Workspace y Outlook / Microsoft 365, con adjuntos y ZIP        | ✅     |
 
 ## Instalación
 
@@ -101,32 +102,33 @@ Tiempo total: 00:01:42
 Base de datos: SQL Server localhost:1433/invoicebot
 ```
 
-| Comando                                                | Función                                                                                              |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `invoicebot scan ./facturas`                           | Procesa los documentos de una carpeta (o un archivo).                                                |
-| `invoicebot scan ./facturas --recursive`               | Incluye subcarpetas.                                                                                 |
-| `invoicebot scan ./facturas --dry-run`                 | Inspecciona los archivos sin guardar nada ni llamar a la IA.                                         |
-| `invoicebot status`                                    | Estado de la base de datos, documentos pendientes y consumo de tokens.                               |
-| `invoicebot export --month 2026-10 --csv`              | Exporta las facturas del mes a `exports/invoices-2026-10.csv`.                                       |
-| `invoicebot duplicates`                                | Lista duplicados exactos y posibles coincidencias.                                                   |
-| `invoicebot review`                                    | Facturas con errores o advertencias, documentos fallidos y pendientes de OCR.                        |
-| `invoicebot retry --failed`                            | Reintenta documentos fallidos (errores transitorios o salidas inválidas).                            |
-| `invoicebot retry --pending`                           | Recupera documentos de una ejecución interrumpida.                                                   |
-| `invoicebot verify-sunat`                              | Consulta en SUNAT si cada comprobante es válido y el estado del RUC emisor.                          |
-| `invoicebot run`                                       | Ciclo desatendido: reintenta, escanea la carpeta de entrada, verifica, exporta y respalda.           |
-| `invoicebot run --watch`                               | Repite el ciclo cada `INVOICEBOT_RUN_INTERVAL_MINUTES` hasta detenerlo.                              |
-| `invoicebot fx set 15/10/2026 3.750`                   | Registra el tipo de cambio de un día (`fx fetch` descarga el de hoy, `fx import tc.csv`, `fx list`). |
-| `invoicebot backup`                                    | Copia verificada de la base de datos (`--list` para ver las existentes).                             |
-| `invoicebot serve --open`                              | Abre la **pantalla de revisión** en el navegador.                                                    |
-| `invoicebot user add <usuario> --name "Nombre"`        | Usuario de la pantalla de revisión en red (`list`, `reset-password`, `disable`, `enable`).           |
-| `invoicebot show <factura>`                            | Datos, incidencias e historial de una factura.                                                       |
-| `invoicebot approve <factura>`                         | Aprueba: confirma los datos y resuelve las advertencias (`--force -n "motivo"` si tiene errores).    |
-| `invoicebot correct <factura> campo=valor…`            | Corrige datos y revalida (`total=118.00 issue_date=15/10/2026`).                                     |
-| `invoicebot reject <factura> -r "motivo"`              | Rechaza: deja de exportarse y de aparecer en la bandeja.                                             |
-| `invoicebot reopen <factura>` · `resolve <incidencia>` | Devuelve a pendiente · da por resuelta una incidencia concreta.                                      |
-| `invoicebot db init` · `db migrate` · `db status`      | Crea la base de datos y su usuario · aplica migraciones · muestra la versión del esquema.            |
-| `invoicebot doctor`                                    | Comprueba Node.js, SQL Server, lectura de PDF, OCR y conexión con la IA.                             |
-| `invoicebot config`                                    | Muestra la configuración efectiva sin revelar secretos.                                              |
+| Comando                                                | Función                                                                                                                                      |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invoicebot scan ./facturas`                           | Procesa los documentos de una carpeta (o un archivo).                                                                                        |
+| `invoicebot scan ./facturas --recursive`               | Incluye subcarpetas.                                                                                                                         |
+| `invoicebot scan ./facturas --dry-run`                 | Inspecciona los archivos sin guardar nada ni llamar a la IA.                                                                                 |
+| `invoicebot status`                                    | Estado de la base de datos, documentos pendientes y consumo de tokens.                                                                       |
+| `invoicebot export --month 2026-10 --csv`              | Exporta las facturas del mes a `exports/invoices-2026-10.csv`.                                                                               |
+| `invoicebot duplicates`                                | Lista duplicados exactos y posibles coincidencias.                                                                                           |
+| `invoicebot review`                                    | Facturas con errores o advertencias, documentos fallidos y pendientes de OCR.                                                                |
+| `invoicebot retry --failed`                            | Reintenta documentos fallidos (errores transitorios o salidas inválidas).                                                                    |
+| `invoicebot retry --pending`                           | Recupera documentos de una ejecución interrumpida.                                                                                           |
+| `invoicebot verify-sunat`                              | Consulta en SUNAT si cada comprobante es válido y el estado del RUC emisor.                                                                  |
+| `invoicebot run`                                       | Ciclo desatendido: reintenta, escanea la carpeta de entrada, verifica, exporta y respalda.                                                   |
+| `invoicebot run --watch`                               | Repite el ciclo cada `INVOICEBOT_RUN_INTERVAL_MINUTES` hasta detenerlo.                                                                      |
+| `invoicebot fx set 15/10/2026 3.750`                   | Registra el tipo de cambio de un día (`fx fetch` descarga el de hoy, `fx import tc.csv`, `fx list`).                                         |
+| `invoicebot mail check` · `mail fetch` · `mail list`   | Prueba la conexión con el buzón · descarga los adjuntos nuevos · muestra los correos leídos (`mail login` inicia sesión en Gmail u Outlook). |
+| `invoicebot backup`                                    | Copia verificada de la base de datos (`--list` para ver las existentes).                                                                     |
+| `invoicebot serve --open`                              | Abre la **pantalla de revisión** en el navegador.                                                                                            |
+| `invoicebot user add <usuario> --name "Nombre"`        | Usuario de la pantalla de revisión en red (`list`, `reset-password`, `disable`, `enable`).                                                   |
+| `invoicebot show <factura>`                            | Datos, incidencias e historial de una factura.                                                                                               |
+| `invoicebot approve <factura>`                         | Aprueba: confirma los datos y resuelve las advertencias (`--force -n "motivo"` si tiene errores).                                            |
+| `invoicebot correct <factura> campo=valor…`            | Corrige datos y revalida (`total=118.00 issue_date=15/10/2026`).                                                                             |
+| `invoicebot reject <factura> -r "motivo"`              | Rechaza: deja de exportarse y de aparecer en la bandeja.                                                                                     |
+| `invoicebot reopen <factura>` · `resolve <incidencia>` | Devuelve a pendiente · da por resuelta una incidencia concreta.                                                                              |
+| `invoicebot db init` · `db migrate` · `db status`      | Crea la base de datos y su usuario · aplica migraciones · muestra la versión del esquema.                                                    |
+| `invoicebot doctor`                                    | Comprueba Node.js, SQL Server, lectura de PDF, OCR y conexión con la IA.                                                                     |
+| `invoicebot config`                                    | Muestra la configuración efectiva sin revelar secretos.                                                                                      |
 
 Opciones globales: `--provider <anthropic|ollama|mock>`, `--data-dir <ruta>`, `--concurrency <n>`, `--json` (salida para automatización) y `--verbose`.
 
@@ -172,6 +174,7 @@ La guía completa para TI está en [docs/instalacion-vm.md](docs/instalacion-vm.
 
 `invoicebot run` hace un ciclo completo sin intervención:
 
+1. Lee el buzón de correo, si está configurado (`INVOICEBOT_MAIL_PROVIDER`), y guarda los comprobantes adjuntos en la carpeta de entrada. Ver [Lectura de correo](#lectura-de-correo).
 1. Descarga el tipo de cambio del dólar publicado hoy por SUNAT (si `INVOICEBOT_FX_SUNAT=true`, por defecto) y lo aplica a las facturas en dólares que lo esperaban. Si SUNAT no responde, el ciclo sigue.
 1. Reintenta los documentos que fallaron antes por errores temporales (dentro de `INVOICEBOT_MAX_ATTEMPTS`).
 1. Escanea `INVOICEBOT_INBOX_DIR` (con subcarpetas). Puede ser una carpeta de **OneDrive o SharePoint sincronizada**, a la que los usuarios arrastran los comprobantes.
@@ -255,6 +258,31 @@ Las incidencias se guardan individualmente en `validation_issues`. Una factura c
 El IGV no se calcula sobre todo el subtotal cuando hay operaciones exoneradas o inafectas: se usa el desglose tributario del comprobante. La aritmética se hace con enteros en céntimos y una tolerancia explícita (`INVOICEBOT_AMOUNT_TOLERANCE`, 0.02 por defecto).
 
 > Validar matemáticamente un RUC **no** confirma que la empresa exista, esté activa ni que el comprobante sea auténtico. Para eso está `invoicebot verify-sunat`.
+
+### Lectura de correo
+
+`invoicebot run` puede leer un buzón y procesar en el mismo ciclo los comprobantes que llegan adjuntos: XML, PDF, fotos y ZIP (muchos sistemas de facturación envían el XML y el PDF comprimidos). Los adjuntos de cada mensaje se guardan juntos en `correo/AAAA-MM/<fecha>-<id>/` dentro de la carpeta de entrada, así el PDF se vincula con su XML. Cada mensaje se lee una sola vez (tabla `mail_messages`); si falla, se reintenta en los ciclos siguientes. Los logos de la firma y los adjuntos que no son comprobantes se ignoran.
+
+El acceso es **de solo lectura**: InvoiceBot no borra, mueve ni marca como leído ningún mensaje. Todo se configura en `.env`:
+
+| Buzón                                             | `INVOICEBOT_MAIL_PROVIDER` | Qué necesitas                                                                                                                                                                                                       |
+| ------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Gmail personal                                    | `imap`                     | Verificación en dos pasos activada y una [contraseña de aplicación](https://myaccount.google.com/apppasswords) en `INVOICEBOT_MAIL_PASSWORD`. El servidor se deduce de la dirección.                                |
+| Correo de hosting (cPanel, Zimbra), Zoho, Yahoo   | `imap`                     | Servidor IMAP (`INVOICEBOT_MAIL_IMAP_HOST`), usuario y contraseña.                                                                                                                                                  |
+| Gmail o Google Workspace, con inicio de sesión    | `gmail`                    | Un ID de cliente OAuth de tipo _App de escritorio_ en Google Cloud con la API de Gmail activada; luego `invoicebot mail login` una vez.                                                                             |
+| Google Workspace de empresa, sin usuario          | `gmail`                    | Una cuenta de servicio con delegación de dominio y el permiso `gmail.readonly` (la configura el administrador de Workspace).                                                                                        |
+| Outlook.com o Microsoft 365, con inicio de sesión | `graph`                    | Una aplicación registrada en Microsoft Entra con el permiso delegado `Mail.Read` y flujos de cliente público; luego `invoicebot mail login` (código en microsoft.com/devicelogin).                                  |
+| Microsoft 365 de empresa, sin usuario             | `graph`                    | Una aplicación con el permiso de aplicación `Mail.Read` otorgado por el administrador (conviene limitarla al buzón de facturas con una directiva de acceso de aplicación), su client secret y el ID del directorio. |
+
+Gmail y Microsoft ya no aceptan la contraseña normal de la cuenta para leer el correo desde otra aplicación. Para las opciones con inicio de sesión, cada organización registra su propia aplicación en Google Cloud o Microsoft Entra (n8n, Zapier o Power Automate funcionan igual: la nube de esos servicios usa la aplicación que ellos registraron). `invoicebot mail login` guarda el acceso en `data/mail-token.json`: protégelo como una contraseña. Microsoft lo renueva en cada uso y InvoiceBot guarda el nuevo.
+
+```bash
+invoicebot mail check     # se conecta y cuenta los correos con adjuntos de los últimos días
+invoicebot mail fetch     # descarga los adjuntos nuevos sin procesarlos
+invoicebot mail list      # últimos correos leídos y qué se hizo con cada uno
+```
+
+Para no leer todo el buzón, crea una carpeta o etiqueta "Facturas" con una regla que mueva allí los correos de los proveedores, y define `INVOICEBOT_MAIL_FOLDER=Facturas`.
 
 ### Detracciones y tipo de cambio
 

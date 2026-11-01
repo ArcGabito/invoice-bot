@@ -37,6 +37,8 @@ x-invoicebot-env: &invoicebot-env
   INVOICEBOT_DB_TRUST_CERT: 'true'
   INVOICEBOT_INBOX_DIR: /inbox
   INVOICEBOT_DATA_DIR: /app/data
+  # /inbox es de solo lectura: los adjuntos del correo se guardan en el volumen de datos.
+  INVOICEBOT_MAIL_DIR: /app/data/correo
   INVOICEBOT_EXPORT_DIR: /app/exports
   INVOICEBOT_LOG_DIR: /app/logs
   INVOICEBOT_BACKUP_DIR: /var/opt/mssql/backup
@@ -81,7 +83,7 @@ services:
       - sqlserver-backups:/backup
     restart: 'no'
 
-  # Ciclo desatendido: reintenta, escanea /inbox, verifica, exporta y respalda.
+  # Ciclo desatendido: lee el correo, reintenta, escanea /inbox, verifica, exporta y respalda.
   bot:
     <<: *invoicebot
     command: ['run', '--watch']
