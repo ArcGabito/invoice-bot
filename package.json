@@ -1,6 +1,6 @@
 {
   "name": "invoicebot",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Bot RPA de facturas peruanas: XML UBL, PDF, OCR e IA, validación contable, SUNAT y SQL Server",
   "main": "dist/cli/index.js",
   "scripts": {

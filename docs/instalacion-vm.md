@@ -64,7 +64,7 @@ En PowerShell como administrador:
 ```powershell
 git clone https://github.com/ArcGabito/invoice-bot.git C:\InvoiceBot
 cd C:\InvoiceBot
-git checkout v0.5.0
+git checkout v0.6.0
 npm ci
 npm run build              # compila a dist\
 npm prune --omit=dev       # quita las herramientas de desarrollo

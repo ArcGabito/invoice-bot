@@ -8,7 +8,7 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 
 > El XML o el LLM proponen los datos; el código comprueba su consistencia; el usuario resuelve los casos dudosos.
 
-## Estado: v0.5.0
+## Estado: v0.6.0
 
 | Funcionalidad                                                                                          | Estado |
 | ------------------------------------------------------------------------------------------------------ | ------ |

@@ -42,7 +42,7 @@ SQL Server en Linux solo funciona en x86-64: no en ARM (Raspberry Pi, Graviton, 
 ```bash
 sudo git clone https://github.com/ArcGabito/invoice-bot.git /srv/invoicebot
 cd /srv/invoicebot
-sudo git checkout v0.5.0
+sudo git checkout v0.6.0
 sudo cp .env.example .env
 sudo chmod 600 .env
 ```
