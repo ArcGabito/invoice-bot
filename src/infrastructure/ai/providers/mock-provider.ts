@@ -75,7 +75,19 @@ export class MockProvider implements AiProvider {
       '(?:importe\\s+)?total(?!\\s*(?:de\\s+)?descuentos?)(?:\\s+a\\s+pagar)?',
     );
 
+    if (/sujeta\s+a\s+(?:la\s+)?detracci[oó]n/i.test(text)) {
+      data.detraction_code = find(
+        /c[oó]digo\s+(?:de\s+)?(?:bien\s+o\s+servicio|detracci[oó]n)\s*:?\s*(\d{3})/i,
+      );
+      data.detraction_percent = find(/detracci[oó]n\s*\(?\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%/i);
+      data.detraction_amount = find(
+        /monto\s+(?:de\s+)?(?:la\s+)?detracci[oó]n\s*:?\s*(?:S\/\.?)?\s*([\d.,]+)/i,
+      );
+      data.detraction_account = find(/banco\s+de\s+la\s+naci[oó]n\s*:?\s*([\d-]{6,})/i);
+    }
+
     for (const field of [
+      'detraction_amount',
       'taxable_amount',
       'exempt_amount',
       'unaffected_amount',

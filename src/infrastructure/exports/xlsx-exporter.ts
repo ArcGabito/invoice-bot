@@ -27,6 +27,7 @@ function cellFor(column: ExportColumn, row: ExportRecord) {
     }
     case 'id':
     case 'int':
+    case 'decimal':
       return { value: Number(value), type: Number };
     default:
       // RUC, serie y número se guardan como texto: no deben perder ceros.

@@ -7,6 +7,7 @@ import { runBot } from '../../application/use-cases/run-bot.ts';
 import type { BackupStep, BotRunStatus } from '../../application/use-cases/run-bot.ts';
 import { createBackup, isBackupDue } from '../../infrastructure/database/backup.ts';
 import { LockedError, acquireLock } from '../../infrastructure/runtime/lock.ts';
+import { exchangeRateSourceFromConfig } from '../../infrastructure/fx/sunat-exchange-rate.ts';
 import { ConfigError, EXIT_CODES } from '../../shared/errors.ts';
 import type { Printer } from '../output.ts';
 import type { Runner } from '../index.ts';
@@ -80,6 +81,7 @@ export function registerRun(program: Command, run: Runner): void {
               recursive: config.run.recursive,
               trigger,
               sunatClient,
+              exchangeRates: config.fx.sunat ? exchangeRateSourceFromConfig(config) : null,
               exportFormat: config.run.export,
               backup,
               host: os.hostname(),
@@ -158,6 +160,14 @@ function printCycle(out: Printer, { runId, status, report, error }: CycleResult)
       'error' in sunat
         ? `  SUNAT: no se completó (${sunat.error})`
         : `  SUNAT: ${sunat.checked} consultados · ${sunat.voided} anulados · ${sunat.notFound} no informados`,
+    );
+  }
+  const fx = report.fx;
+  if (fx) {
+    out.line(
+      'error' in fx
+        ? `  Tipo de cambio: no disponible (${fx.error})`
+        : `  Tipo de cambio ${fx.date}: S/ ${fx.sell.toFixed(3)} por dólar${fx.updated ? ` · aplicado a ${fx.updated} facturas pendientes` : ''}`,
     );
   }
   for (const e of report.exports) out.line(`  Exportado: ${e.path} (${e.rows} facturas)`);

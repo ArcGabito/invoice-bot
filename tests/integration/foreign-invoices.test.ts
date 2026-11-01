@@ -160,8 +160,13 @@ describe('facturas de proveedores del exterior', () => {
     const result = await exportInvoices({ month: '2026-08', deps: env.deps });
     const lines = fs.readFileSync(result.path, 'utf8').trim().split('\r\n');
     expect(result.rows).toBe(1); // la copia queda fuera por duplicada
-    expect(lines[0].endsWith(',supplier_tax_id,supplier_country,review_status')).toBe(true);
+    expect(
+      lines[0].endsWith(
+        ',supplier_country,review_status,detraction_code,detraction_percent,detraction_amount,detraction_account,exchange_rate,exchange_rate_date,total_pen,net_payable',
+      ),
+    ).toBe(true);
     expect(lines[1]).toContain(',91,,IN-12345678,USD,10.44,');
-    expect(lines[1].endsWith(',12-3456789,US,pending')).toBe(true);
+    // Sin tipo de cambio cargado: sin total en soles; el neto queda en dólares.
+    expect(lines[1].endsWith(',12-3456789,US,pending,,,,,,,,10.44')).toBe(true);
   });
 });

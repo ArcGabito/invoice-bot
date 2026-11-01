@@ -8,12 +8,16 @@ import type { ScanDeps, ScanSummary } from './scan-invoices.ts';
 import type { SunatClient } from '../../infrastructure/sunat/sunat-client.ts';
 import type { Deps } from '../deps.ts';
 import { errorMessage } from '../../shared/errors.ts';
+import { saveExchangeRates } from './exchange-rates.ts';
+import type { ExchangeRateSource } from '../../infrastructure/fx/sunat-exchange-rate.ts';
 
 export interface BotReport {
   inboxDir: string;
   retry: RetrySummary | null;
   scan: ScanSummary | null;
   sunat: SunatSummary | { error: string } | null;
+  /** Tipo de cambio del día descargado de SUNAT y facturas a las que se aplicó. */
+  fx: { date: string; sell: number; updated: number } | { error: string } | null;
   exports: { path: string; rows: number }[];
   backup: { path: string } | null;
 }
@@ -52,6 +56,7 @@ export async function runBot({
   recursive = true,
   trigger = 'manual',
   sunatClient = null,
+  exchangeRates = null,
   exportFormat = 'none',
   backup = null,
   host = null,
@@ -62,6 +67,7 @@ export async function runBot({
   recursive?: boolean;
   trigger?: string;
   sunatClient?: Pick<SunatClient, 'validateReceipt'> | null;
+  exchangeRates?: ExchangeRateSource | null;
   exportFormat?: string;
   backup?: BackupStep | null;
   host?: string | null;
@@ -83,6 +89,7 @@ export async function runBot({
     retry: null,
     scan: null,
     sunat: null,
+    fx: null,
     exports: [],
     backup: null,
   };
@@ -90,6 +97,18 @@ export async function runBot({
   let exitCode = 0;
   let error: string | null = null;
   try {
+    // Antes de escanear: las facturas nuevas en dólares ya encuentran el tipo de cambio del día.
+    // Un fallo de SUNAT no detiene el ciclo: esas facturas quedan con la advertencia FX_RATE_MISSING.
+    if (exchangeRates) {
+      try {
+        const today = await exchangeRates.fetchToday();
+        const { updated } = await saveExchangeRates({ rates: [today], deps });
+        report.fx = { date: today.date, sell: today.sell, updated };
+      } catch (fxError) {
+        report.fx = { error: errorMessage(fxError) };
+        log.warn({ err: { message: report.fx.error } }, 'tipo de cambio no disponible');
+      }
+    }
     const retry = await retryDocuments({ deps, failed: true, pending: false });
     report.retry = retry;
     const scan = await scanInvoices({ root: inboxDir, recursive, deps });
@@ -154,6 +173,8 @@ export function compactReport(report: BotReport) {
     retryFailed: report.retry?.failed ?? 0,
     sunatChecked: sunat && 'checked' in sunat ? sunat.checked : null,
     sunatError: sunat && 'error' in sunat ? sunat.error : null,
+    fxRate: report.fx && 'sell' in report.fx ? report.fx.sell : null,
+    fxError: report.fx && 'error' in report.fx ? report.fx.error : null,
     exports: report.exports.map((e) => e.path),
     backup: report.backup?.path ?? null,
   };

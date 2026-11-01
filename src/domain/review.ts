@@ -24,6 +24,9 @@ const TEXT_FIELDS: readonly string[] = [
   'issue_date',
   'due_date',
   'currency',
+  'detraction_code',
+  'detraction_percent',
+  'detraction_account',
 ];
 
 export const CORRECTABLE_FIELDS: readonly string[] = Object.freeze([
@@ -71,6 +74,9 @@ export function parseCorrection(field: string, raw: unknown): Correction {
   const { invoice } = normalizeInvoice({ [field]: text === '' ? null : text });
   const column = field as keyof InvoiceData;
   const value = invoice[column] ?? null;
+  if (field === 'detraction_percent' && text !== '' && value === null) {
+    throw new CorrectionError(`Porcentaje no válido para ${field}: "${raw}" (usa p. ej. 12 o 1.5)`);
+  }
   return { field, column, value, display: value === null ? '' : String(value) };
 }
 

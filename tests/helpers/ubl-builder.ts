@@ -40,6 +40,7 @@ export function buildUblInvoice({
   charge = null,
   prepaid = null,
   payable = '118.00',
+  detraction = null,
   encoding = 'UTF-8',
 }: {
   root?: string;
@@ -59,6 +60,8 @@ export function buildUblInvoice({
   charge?: string | null;
   prepaid?: string | null;
   payable?: string | null;
+  /** Operación sujeta a detracción: código del catálogo 54, % e importe (en soles). */
+  detraction?: { code: string; percent: string; amount: string; account?: string } | null;
   encoding?: string;
 } = {}): string {
   const amount = (tag: string, value: string | null) =>
@@ -90,6 +93,25 @@ export function buildUblInvoice({
     <cac:PartyName><cbc:Name>NOMBRE COMERCIAL</cbc:Name></cac:PartyName>
     <cac:PartyLegalEntity><cbc:RegistrationName><![CDATA[${supplierName}]]></cbc:RegistrationName></cac:PartyLegalEntity>
   </cac:Party></cac:AccountingSupplierParty>
+  ${
+    detraction
+      ? `<cac:PaymentMeans>
+    <cbc:ID>Detraccion</cbc:ID>
+    <cbc:PaymentMeansCode>001</cbc:PaymentMeansCode>
+    <cac:PayeeFinancialAccount><cbc:ID>${detraction.account ?? '00-000-123456'}</cbc:ID></cac:PayeeFinancialAccount>
+  </cac:PaymentMeans>
+  <cac:PaymentTerms>
+    <cbc:ID>Detraccion</cbc:ID>
+    <cbc:PaymentMeansID>${detraction.code}</cbc:PaymentMeansID>
+    <cbc:PaymentPercent>${detraction.percent}</cbc:PaymentPercent>
+    <cbc:Amount currencyID="PEN">${detraction.amount}</cbc:Amount>
+  </cac:PaymentTerms>
+  <cac:PaymentTerms>
+    <cbc:ID>FormaPago</cbc:ID>
+    <cbc:PaymentMeansID>Contado</cbc:PaymentMeansID>
+  </cac:PaymentTerms>`
+      : ''
+  }
   <cac:AccountingCustomerParty><cac:Party>
     <cac:PartyIdentification><cbc:ID schemeID="${customerScheme}">${customerId}</cbc:ID></cac:PartyIdentification>
     <cac:PartyLegalEntity><cbc:RegistrationName>${customerName}</cbc:RegistrationName></cac:PartyLegalEntity>

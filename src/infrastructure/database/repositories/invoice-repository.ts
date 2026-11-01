@@ -4,10 +4,12 @@ import { AMOUNT_FIELDS, DATA_SOURCE, DOCUMENT_STATUS } from '../../../domain/inv
 import type { Severity } from '../../../domain/invoice.ts';
 import { statusFromIssues } from '../../../domain/invoice-validation.ts';
 import { SUNAT_RULE_PREFIX } from '../../../domain/sunat-status.ts';
+import { EXCHANGE_RATE_LOOKBACK_DAYS } from '../../../domain/exchange-rate.ts';
 import type {
   BotRunRow,
   Database,
   DocumentRow,
+  ExchangeRateRow,
   ExtractionRunRow,
   InvoiceDataColumns,
   InvoiceRow,
@@ -30,6 +32,9 @@ export const INVOICE_COLUMNS = [
   'issue_date',
   'due_date',
   'currency',
+  'detraction_code',
+  'detraction_percent',
+  'detraction_account',
   ...AMOUNT_FIELDS.map((f) => `${f}_cents` as const),
 ] as (keyof InvoiceDataColumns)[];
 
@@ -324,6 +329,7 @@ export class InvoiceRepository {
     businessKey,
     dataSource = DATA_SOURCE.AI,
     issues,
+    exchangeRate = null,
   }: {
     documentId: number;
     extractionRunId: number;
@@ -333,9 +339,15 @@ export class InvoiceRepository {
     businessKey: string | null;
     dataSource?: string;
     issues: NewIssue[];
+    /** Tipo de cambio aplicado a un comprobante en otra moneda. */
+    exchangeRate?: { rate: number; date: string } | null;
   }): Promise<number> {
     return this.transaction(async (repo) => {
-      const values = invoiceValues(invoice);
+      const values = {
+        ...invoiceValues(invoice),
+        exchange_rate: exchangeRate?.rate ?? null,
+        exchange_rate_date: exchangeRate?.date ?? null,
+      };
       const existing = await repo.db
         .selectFrom('invoices')
         .select('id')
@@ -462,6 +474,98 @@ export class InvoiceRepository {
       .where('i.document_id', '<>', excludeDocumentId)
       .where('i.review_status', '<>', 'rejected')
       .orderBy('i.id')
+      .execute();
+  }
+
+  // --- Tipo de cambio -----------------------------------------------------
+
+  /**
+   * Tipo de cambio venta de `currency` para `date`, o el último publicado
+   * hasta EXCHANGE_RATE_LOOKBACK_DAYS antes (fines de semana y feriados).
+   */
+  async findExchangeRate(
+    currency: string,
+    date: string,
+  ): Promise<{ rate: number; date: string } | null> {
+    const row = await sql<{ sell: number; rate_date: string }>`
+      SELECT TOP (1) sell, rate_date FROM exchange_rates
+      WHERE currency = ${currency}
+        AND rate_date <= ${date}
+        AND rate_date >= DATEADD(DAY, ${-EXCHANGE_RATE_LOOKBACK_DAYS}, CAST(${date} AS DATE))
+      ORDER BY rate_date DESC`.execute(this.db);
+    const found = row.rows[0];
+    return found ? { rate: Number(found.sell), date: found.rate_date } : null;
+  }
+
+  /**
+   * Guarda tipos de cambio. Uno cargado a mano o por CSV no se sobrescribe
+   * con la descarga automática de SUNAT del mismo día.
+   */
+  async upsertExchangeRates(
+    rates: { currency: string; date: string; buy: number | null; sell: number; source: string }[],
+  ): Promise<number> {
+    let changed = 0;
+    for (const r of rates) {
+      const result = await sql`
+        MERGE exchange_rates AS t
+        USING (SELECT ${r.currency} AS currency, CAST(${r.date} AS DATE) AS rate_date) AS s
+          ON t.currency = s.currency AND t.rate_date = s.rate_date
+        WHEN MATCHED AND NOT (${r.source} = N'sunat' AND t.source <> N'sunat') THEN
+          UPDATE SET buy = ${r.buy}, sell = ${r.sell}, source = ${r.source}, updated_at = SYSUTCDATETIME()
+        WHEN NOT MATCHED THEN
+          INSERT (currency, rate_date, buy, sell, source)
+          VALUES (${r.currency}, CAST(${r.date} AS DATE), ${r.buy}, ${r.sell}, ${r.source});`.execute(
+        this.db,
+      );
+      changed += Number(result.numAffectedRows ?? 0);
+    }
+    return changed;
+  }
+
+  async listExchangeRates({
+    currency = 'USD',
+    from,
+    to,
+  }: {
+    currency?: string;
+    from: string;
+    to: string;
+  }): Promise<ExchangeRateRow[]> {
+    return this.db
+      .selectFrom('exchange_rates')
+      .selectAll()
+      .where('currency', '=', currency)
+      .where('rate_date', '>=', from)
+      .where('rate_date', '<=', to)
+      .orderBy('rate_date')
+      .execute();
+  }
+
+  /** Facturas en otra moneda que todavía no tienen tipo de cambio. */
+  async listInvoicesAwaitingExchangeRate(): Promise<InvoiceRow[]> {
+    return this.db
+      .selectFrom('invoices')
+      .selectAll()
+      .where('exchange_rate', 'is', null)
+      .where('currency', 'is not', null)
+      .where('currency', '<>', 'PEN')
+      .where('issue_date', 'is not', null)
+      .orderBy('id')
+      .execute();
+  }
+
+  async setInvoiceExchangeRate(
+    invoiceId: number,
+    exchangeRate: { rate: number; date: string } | null,
+  ): Promise<void> {
+    await this.db
+      .updateTable('invoices')
+      .set({
+        exchange_rate: exchangeRate?.rate ?? null,
+        exchange_rate_date: exchangeRate?.date ?? null,
+        updated_at: utcNow,
+      })
+      .where('id', '=', invoiceId)
       .execute();
   }
 

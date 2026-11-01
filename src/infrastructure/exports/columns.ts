@@ -1,3 +1,6 @@
+import { netPayableCents, totalInPen } from '../../domain/detraction.ts';
+import type { InvoiceData } from '../../domain/invoice.ts';
+
 /**
  * Columnas de exportación, compartidas por CSV y Excel. El orden y las claves
  * son parte del contrato público (docs/csv-format.md): las columnas nuevas se
@@ -5,9 +8,9 @@
  *
  * - key: nombre de la columna en el CSV.
  * - label: encabezado en Excel, pensado para personas.
- * - type: id | text | date | amount | int.
+ * - type: id | text | date | amount | int | decimal (porcentajes y tipo de cambio).
  */
-export type ColumnType = 'id' | 'text' | 'date' | 'amount' | 'int';
+export type ColumnType = 'id' | 'text' | 'date' | 'amount' | 'int' | 'decimal';
 
 export interface ExportColumn {
   key: string;
@@ -15,6 +18,10 @@ export interface ExportColumn {
   type: ColumnType;
   width?: number;
 }
+
+const rateOf = (row: ExportRecord) =>
+  row.exchange_rate === null || row.exchange_rate === undefined ? null : Number(row.exchange_rate);
+const asInvoice = (row: ExportRecord) => row as unknown as InvoiceData;
 
 /** Fila de la consulta de exportación (ExportRow del repositorio). */
 export type ExportRecord = Record<string, unknown>;
@@ -52,11 +59,22 @@ export const EXPORT_COLUMNS: readonly ExportColumn[] = Object.freeze([
   { key: 'supplier_tax_id', label: 'ID fiscal emisor (exterior)', type: 'text', width: 16 },
   { key: 'supplier_country', label: 'País emisor', type: 'text', width: 8 },
   { key: 'review_status', label: 'Revisión', type: 'text', width: 10 },
+  { key: 'detraction_code', label: 'Cód. detracción', type: 'text', width: 9 },
+  { key: 'detraction_percent', label: '% detracción', type: 'decimal', width: 9 },
+  { key: 'detraction_amount', label: 'Detracción (S/)', type: 'amount' },
+  { key: 'detraction_account', label: 'Cta. detracciones', type: 'text', width: 16 },
+  { key: 'exchange_rate', label: 'Tipo de cambio', type: 'decimal', width: 9 },
+  { key: 'exchange_rate_date', label: 'Fecha T.C.', type: 'date', width: 12 },
+  { key: 'total_pen', label: 'Total en soles', type: 'amount' },
+  { key: 'net_payable', label: 'Neto a pagar', type: 'amount' },
 ]);
 
 /** Valor de una columna para una fila de la consulta de exportación. */
 export function columnValue(row: ExportRecord, column: ExportColumn): unknown {
   if (column.key === 'invoice_id') return row.id;
+  // Calculadas: total en soles y neto a pagar al proveedor (total menos detracción).
+  if (column.key === 'total_pen') return totalInPen(asInvoice(row), rateOf(row));
+  if (column.key === 'net_payable') return netPayableCents(asInvoice(row), rateOf(row));
   if (column.type === 'amount') return row[`${column.key}_cents`] ?? null;
   return row[column.key] ?? null;
 }

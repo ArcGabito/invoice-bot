@@ -71,6 +71,10 @@ export interface InvoicesTable extends InvoiceDataColumns {
   rules_version: string;
   sunat_status: string | null;
   sunat_checked_at: string | null;
+  /** Tipo de cambio venta aplicado (soles por unidad de `currency`); null en soles o si falta. */
+  exchange_rate: number | null;
+  /** Fecha de publicación del tipo de cambio aplicado (la de emisión o el último día hábil anterior). */
+  exchange_rate_date: string | null;
   review_status: Generated<string>;
   reviewed_at: string | null;
   reviewed_by: string | null;
@@ -153,6 +157,16 @@ export interface ReviewSessionsTable {
   expires_at: string;
 }
 
+export interface ExchangeRatesTable {
+  currency: string;
+  rate_date: string;
+  buy: number | null;
+  sell: number;
+  /** sunat (descarga diaria), manual (`fx set`) o csv (`fx import`). */
+  source: string;
+  updated_at: Timestamp;
+}
+
 export interface SchemaMigrationsTable {
   version: number;
   name: string;
@@ -170,6 +184,7 @@ export interface Database {
   bot_runs: BotRunsTable;
   users: UsersTable;
   review_sessions: ReviewSessionsTable;
+  exchange_rates: ExchangeRatesTable;
   schema_migrations: SchemaMigrationsTable;
 }
 
@@ -180,4 +195,5 @@ export type ExtractionRunRow = Selectable<ExtractionRunsTable>;
 export type ReviewActionRow = Selectable<ReviewActionsTable>;
 export type BotRunRow = Selectable<BotRunsTable>;
 export type UserRow = Selectable<UsersTable>;
+export type ExchangeRateRow = Selectable<ExchangeRatesTable>;
 export type NewExtractionRun = Insertable<ExtractionRunsTable>;

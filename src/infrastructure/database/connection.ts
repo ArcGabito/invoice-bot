@@ -30,7 +30,7 @@ export interface DbConnectionOptions {
 }
 
 /** Columnas DATE: se devuelven como "AAAA-MM-DD", sin hora. */
-const DATE_ONLY_COLUMNS = new Set(['issue_date', 'due_date']);
+const DATE_ONLY_COLUMNS = new Set(['issue_date', 'due_date', 'exchange_rate_date', 'rate_date']);
 
 /**
  * Convierte los valores que devuelve tedious a los tipos que usa la

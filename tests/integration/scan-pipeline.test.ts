@@ -278,7 +278,8 @@ describe('exportInvoices', () => {
     expect(lines[0]).toBe(
       'invoice_id,issue_date,due_date,supplier_ruc,supplier_name,customer_ruc,customer_name,document_type,series,number,currency,' +
         'subtotal,taxable_amount,exempt_amount,unaffected_amount,discount_amount,igv,isc,icbper,other_charges,other_taxes,total,' +
-        'validation_status,duplicate_count,file_name,sha256,data_source,sunat_status,prepaid_amount,supplier_tax_id,supplier_country,review_status',
+        'validation_status,duplicate_count,file_name,sha256,data_source,sunat_status,prepaid_amount,supplier_tax_id,supplier_country,review_status' +
+        ',detraction_code,detraction_percent,detraction_amount,detraction_account,exchange_rate,exchange_rate_date,total_pen,net_payable',
     );
     expect(lines[1]).toContain(',2026-10-15,,20100047218,PROVEEDOR DE EJEMPLO S.A.C.,20131312955,');
     expect(lines[1]).toContain(',01,F001,00001234,PEN,,100.00,,,,18.00,,,,,118.00,valid,1,a.pdf,');

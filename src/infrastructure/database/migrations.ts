@@ -266,4 +266,61 @@ const initial: Migration = {
   ],
 };
 
-export const MIGRATIONS: Migration[] = [initial];
+/** Detracciones (SPOT) y tipo de cambio de SUNAT para comprobantes en otra moneda. */
+const detractionAndExchange: Migration = {
+  version: 2,
+  name: '002_detraction_exchange_rate',
+  batches: [
+    `ALTER TABLE invoices ADD
+      -- Código del catálogo 54 de SUNAT, porcentaje, monto (siempre en soles) y cuenta del Banco de la Nación.
+      detraction_code          NVARCHAR(3)   NULL,
+      detraction_percent       DECIMAL(5, 2) NULL,
+      detraction_amount_cents  BIGINT        NULL,
+      detraction_account       NVARCHAR(30)  NULL,
+      -- Tipo de cambio venta aplicado y fecha de su publicación (NULL en soles o si aún no se conoce).
+      exchange_rate            DECIMAL(9, 4) NULL,
+      exchange_rate_date       DATE          NULL`,
+    `CREATE TABLE exchange_rates (
+      currency    NVARCHAR(3)   NOT NULL,
+      rate_date   DATE          NOT NULL,
+      buy         DECIMAL(9, 4) NULL,
+      sell        DECIMAL(9, 4) NOT NULL CONSTRAINT ck_exchange_rates_sell CHECK (sell > 0),
+      source      NVARCHAR(10)  NOT NULL
+                  CONSTRAINT ck_exchange_rates_source CHECK (source IN (N'sunat', N'manual', N'csv')),
+      updated_at  DATETIME2(3)  NOT NULL CONSTRAINT df_exchange_rates_updated DEFAULT SYSUTCDATETIME(),
+      CONSTRAINT pk_exchange_rates PRIMARY KEY (currency, rate_date)
+    )`,
+    // Facturas en otra moneda que esperan su tipo de cambio.
+    `CREATE INDEX ix_invoices_fx_pending ON invoices (currency, issue_date)
+      WHERE exchange_rate IS NULL AND currency <> N'PEN'`,
+    `ALTER VIEW v_invoices AS
+    SELECT
+      i.id AS invoice_id, i.document_id, d.file_name, d.file_path,
+      i.supplier_name, i.supplier_ruc, i.supplier_tax_id, i.supplier_country,
+      i.customer_name, i.customer_ruc, i.document_type, i.series, i.number,
+      i.issue_date, i.due_date, i.currency,
+      CAST(i.subtotal_cents / 100.0 AS DECIMAL(18, 2)) AS subtotal,
+      CAST(i.taxable_amount_cents / 100.0 AS DECIMAL(18, 2)) AS taxable_amount,
+      CAST(i.exempt_amount_cents / 100.0 AS DECIMAL(18, 2)) AS exempt_amount,
+      CAST(i.unaffected_amount_cents / 100.0 AS DECIMAL(18, 2)) AS unaffected_amount,
+      CAST(i.discount_amount_cents / 100.0 AS DECIMAL(18, 2)) AS discount_amount,
+      CAST(i.igv_cents / 100.0 AS DECIMAL(18, 2)) AS igv,
+      CAST(i.isc_cents / 100.0 AS DECIMAL(18, 2)) AS isc,
+      CAST(i.icbper_cents / 100.0 AS DECIMAL(18, 2)) AS icbper,
+      CAST(i.other_charges_cents / 100.0 AS DECIMAL(18, 2)) AS other_charges,
+      CAST(i.other_taxes_cents / 100.0 AS DECIMAL(18, 2)) AS other_taxes,
+      CAST(i.total_cents / 100.0 AS DECIMAL(18, 2)) AS total,
+      CAST(i.prepaid_amount_cents / 100.0 AS DECIMAL(18, 2)) AS prepaid_amount,
+      i.data_source, i.validation_status, i.review_status, i.reviewed_by, i.reviewed_at,
+      i.sunat_status, i.sunat_checked_at, i.corrected, i.created_at, i.updated_at,
+      i.detraction_code, i.detraction_percent,
+      CAST(i.detraction_amount_cents / 100.0 AS DECIMAL(18, 2)) AS detraction_amount,
+      i.detraction_account, i.exchange_rate, i.exchange_rate_date,
+      CASE WHEN i.currency = N'PEN' THEN CAST(i.total_cents / 100.0 AS DECIMAL(18, 2))
+           ELSE CAST(ROUND(i.total_cents * i.exchange_rate, 0) / 100.0 AS DECIMAL(18, 2)) END AS total_pen
+    FROM invoices i
+    JOIN documents d ON d.id = i.document_id`,
+  ],
+};
+
+export const MIGRATIONS: Migration[] = [initial, detractionAndExchange];

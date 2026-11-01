@@ -52,6 +52,16 @@ export const ExtractionSchema = z.object({
   other_taxes: amount('Otros tributos'),
   total: amount('Importe total a pagar del comprobante'),
   prepaid_amount: amount('Anticipos ya pagados y deducidos del total'),
+  detraction_code: nullableText(
+    'Detracción (SPOT): código de bien o servicio sujeto, 3 dígitos (p. ej. "037"). null si el comprobante no indica detracción',
+  ),
+  detraction_percent: nullableText(
+    'Detracción: porcentaje tal como aparece, sin el signo % (p. ej. "12"). null si no indica detracción',
+  ),
+  detraction_amount: amount('Detracción: monto a depositar, en soles'),
+  detraction_account: nullableText(
+    'Detracción: número de cuenta del proveedor en el Banco de la Nación. null si no aparece',
+  ),
   notes: z
     .array(z.string())
     .describe(

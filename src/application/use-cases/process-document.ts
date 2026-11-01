@@ -1,4 +1,5 @@
 import { businessKey } from '../../domain/duplicate-detection.ts';
+import { lookupExchangeRate } from './exchange-rates.ts';
 import {
   DATA_SOURCE,
   DOCUMENT_STATUS,
@@ -196,10 +197,12 @@ export async function processDocument({
   }
 
   const { invoice, normalizationIssues } = normalizeInvoice(data);
+  const exchangeRate = await lookupExchangeRate(repository, invoice);
   const validation = validateInvoice(invoice, {
     normalizationIssues,
     toleranceCents: config.amountToleranceCents,
     today,
+    exchangeRate,
   });
   const issues: NewIssue[] = [
     ...validation.issues,
@@ -252,6 +255,7 @@ export async function processDocument({
       businessKey: key,
       dataSource,
       issues: all,
+      exchangeRate,
     });
     return { validationStatus: status, possibleDuplicate: matches.length > 0 };
   });

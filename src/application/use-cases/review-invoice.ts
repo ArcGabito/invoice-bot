@@ -15,6 +15,7 @@ import { formatCents } from '../../shared/money.ts';
 import { ReviewError } from '../../shared/errors.ts';
 import type { Deps } from '../deps.ts';
 import type { InvoiceRepository } from '../ports/invoice-repository.ts';
+import { lookupExchangeRate } from './exchange-rates.ts';
 import type { InvoiceDetail } from '../../infrastructure/database/repositories/invoice-repository.ts';
 
 /**
@@ -306,9 +307,13 @@ export async function correctInvoice({
     }
 
     const updated = await requireInvoice(tx, invoice.id);
+    // La moneda o la fecha pueden haber cambiado: se vuelve a buscar el tipo de cambio.
+    const exchangeRate = await lookupExchangeRate(tx, updated);
+    await tx.setInvoiceExchangeRate(invoice.id, exchangeRate);
     const { issues } = validateInvoice(updated, {
       toleranceCents: config.amountToleranceCents,
       today,
+      exchangeRate,
     });
     const key = businessKey(updated);
     if (key) await tx.lockBusinessKey(key);

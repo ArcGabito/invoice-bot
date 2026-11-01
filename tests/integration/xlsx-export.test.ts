@@ -33,6 +33,10 @@ describe('exportación a Excel', () => {
         payable: '1180.00',
       }),
     );
+    // Con el tipo de cambio del día de emisión, el USD también se registra en soles.
+    await env.deps.repository.upsertExchangeRates([
+      { currency: 'USD', date: '2026-10-15', buy: 3.74, sell: 3.75, source: 'manual' },
+    ]);
     await scanInvoices({ root: inbox, deps: env.deps });
 
     const result = await exportInvoices({ month: '2026-10', format: 'xlsx', deps: env.deps });
@@ -55,6 +59,10 @@ describe('exportación a Excel', () => {
       '2026-10-15',
     );
     expect(pen[col('data_source')]).toBe('xml');
+    expect(pen[col('total_pen')]).toBe(118);
+    const usd = rows.find((r) => r[col('currency')] === 'USD')!;
+    expect(usd[col('exchange_rate')]).toBe(3.75);
+    expect(usd[col('total_pen')]).toBe(4425);
 
     const summary = sheets[1].data;
     expect(summary[0][0]).toMatch(/^Facturas 2026-10/);

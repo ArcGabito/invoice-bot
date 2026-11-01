@@ -41,6 +41,8 @@ const baseEnv = {
   INVOICEBOT_LOG_DIR: './logs',
   INVOICEBOT_RUN_EXPORT: 'xlsx',
   INVOICEBOT_SUNAT_ENABLED: 'false',
+  // Sin red en las pruebas: el tipo de cambio se carga con fx set.
+  INVOICEBOT_FX_SUNAT: 'false',
 };
 
 function cli(env: Record<string, string>, ...args: string[]) {
@@ -111,5 +113,25 @@ describe('ejecución desatendida desde la CLI', { timeout: 60_000 }, () => {
     expect(exp.code).toBe(0);
     expect(fs.existsSync(path.join(workDir, 'reporte.xlsx'))).toBe(true);
     expect(cli({}, 'export', '--format', 'pdf').code).toBe(2);
+  });
+
+  it('fx set, import y list cargan y muestran tipos de cambio', async () => {
+    const set = cli({}, 'fx', 'set', '15/10/2026', '3,750', '--compra', '3.741');
+    expect(set.code).toBe(0);
+    expect(set.stdout).toContain('Tipos de cambio guardados: 1 de 1');
+
+    fs.writeFileSync(path.join(workDir, 'tc.csv'), 'fecha;compra;venta\n16/10/2026;3.744;3.752\n');
+    expect(cli({}, 'fx', 'import', 'tc.csv').stdout).toContain('Tipos de cambio guardados: 1 de 1');
+
+    const list = cli({}, 'fx', 'list', '--month', '2026-10');
+    expect(list.stdout).toContain('2026-10-15  3.741  3.750  manual');
+    expect(list.stdout).toContain('2026-10-16  3.744  3.752  csv');
+
+    expect(cli({}, 'fx', 'set', '31/02/2026', '3.7').code).toBe(2);
+    expect(cli({}, 'fx', 'set', '15/10/2026', '3.7', '--moneda', 'PEN').code).toBe(2);
+    fs.writeFileSync(path.join(workDir, 'malo.csv'), '16/10/2026;x\n');
+    const bad = cli({}, 'fx', 'import', 'malo.csv');
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain('Línea 1: importes no válidos');
   });
 });

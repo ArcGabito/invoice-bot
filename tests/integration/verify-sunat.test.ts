@@ -108,10 +108,13 @@ describe('verifySunat', () => {
     expect(result.rows).toBe(2);
     expect(
       csv[0].endsWith(
-        ',data_source,sunat_status,prepaid_amount,supplier_tax_id,supplier_country,review_status',
+        ',data_source,sunat_status,prepaid_amount,supplier_tax_id,supplier_country,review_status' +
+          ',detraction_code,detraction_percent,detraction_amount,detraction_account,exchange_rate,exchange_rate_date,total_pen,net_payable',
       ),
     ).toBe(true);
-    expect(csv.find((l) => l.includes('00000001'))).toMatch(/,xml,ACEPTADO,,,PE,pending$/);
+    expect(csv.find((l) => l.includes('00000001'))).toMatch(
+      /,xml,ACEPTADO,,,PE,pending,,,,,,,118.00,118.00$/,
+    );
   });
 
   it('sin --force solo vuelve a consultar lo no informado y reemplaza sus incidencias', async () => {

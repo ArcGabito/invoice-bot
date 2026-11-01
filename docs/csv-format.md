@@ -2,44 +2,52 @@
 
 `invoicebot export` genera un CSV en UTF-8, con fin de línea CRLF, una fila de encabezados y una fila por factura. Por defecto usa coma como separador (`--delimiter ";"` para Excel en español) y no añade BOM (`--bom` para Excel).
 
-Con `--xlsx` las mismas columnas, en el mismo orden, se escriben en la hoja *Facturas* de un Excel con encabezados legibles, importes numéricos y fechas reales; la hoja *Resumen* trae totales por moneda y estado de validación.
+Con `--xlsx` las mismas columnas, en el mismo orden, se escriben en la hoja _Facturas_ de un Excel con encabezados legibles, importes numéricos y fechas reales; la hoja _Resumen_ trae totales por moneda y estado de validación.
 
 Las columnas, su orden y sus nombres son estables dentro de una versión mayor. Las nuevas columnas se añaden al final.
 
-| Columna | Formato | Descripción |
-| --- | --- | --- |
-| `invoice_id` | entero | Identificador interno de la factura. |
-| `issue_date` | `AAAA-MM-DD` | Fecha de emisión. |
-| `due_date` | `AAAA-MM-DD` o vacío | Fecha de vencimiento. |
-| `supplier_ruc` | 11 dígitos | RUC del emisor. |
-| `supplier_name` | texto | Razón social del emisor. |
-| `customer_ruc` | 11 u 8 dígitos o vacío | RUC o DNI del cliente. |
-| `customer_name` | texto | Nombre del cliente. |
-| `document_type` | 2 dígitos | Catálogo 01 de SUNAT: `01` factura, `03` boleta, `07` nota de crédito, `08` nota de débito; `91` comprobante de un proveedor del exterior (sin serie, con `number` tal como aparece, p. ej. `IN-12345678`). |
-| `series` | texto | Serie (`F001`, `B001`, `E001`, `0001`). |
-| `number` | dígitos | Correlativo, tal como aparece en el comprobante. |
-| `currency` | ISO 4217 | `PEN`, `USD`… |
-| `subtotal` | decimal | Subtotal o valor de venta. |
-| `taxable_amount` | decimal | Operaciones gravadas. |
-| `exempt_amount` | decimal | Operaciones exoneradas. |
-| `unaffected_amount` | decimal | Operaciones inafectas. |
-| `discount_amount` | decimal | Descuentos globales. |
-| `igv` | decimal | IGV. |
-| `isc` | decimal | ISC. |
-| `icbper` | decimal | Impuesto a las bolsas plásticas. |
-| `other_charges` | decimal | Otros cargos. |
-| `other_taxes` | decimal | Otros tributos. |
-| `total` | decimal | Importe total. |
-| `validation_status` | `valid`, `warning`, `error` | Resultado de la validación. |
-| `duplicate_count` | entero | Otras facturas registradas con el mismo emisor, tipo, serie y número. |
-| `file_name` | texto | Nombre del archivo original. |
-| `sha256` | hex | Huella del archivo original. |
-| `data_source` | `xml`, `ai` | Origen de los datos: el XML del comprobante electrónico (exacto) o la extracción con IA desde el PDF (propuesta, validada). Añadida en v0.2.0. |
-| `sunat_status` | texto o vacío | Último estado del comprobante según la consulta de validez de SUNAT: `ACEPTADO`, `AUTORIZADO`, `ANULADO`, `NO EXISTE` o `NO AUTORIZADO`. Vacío si no se ha consultado (`invoicebot verify-sunat`). Añadida en v0.2.0. |
-| `prepaid_amount` | decimal | Anticipos ya pagados y deducidos del total de este comprobante. Añadida en v0.2.0. |
-| `supplier_tax_id` | texto o vacío | Identificador fiscal de un proveedor del exterior (EIN, VAT ID…). Añadida en v0.2.0. |
-| `supplier_country` | ISO 3166 o vacío | País del proveedor (`PE` en comprobantes electrónicos XML). Añadida en v0.2.0. |
-| `review_status` | `pending`, `approved` | Revisión humana: pendiente o aprobada por una persona (las rechazadas no se exportan). Añadida en v0.2.0. |
+| Columna              | Formato                     | Descripción                                                                                                                                                                                                           |
+| -------------------- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `invoice_id`         | entero                      | Identificador interno de la factura.                                                                                                                                                                                  |
+| `issue_date`         | `AAAA-MM-DD`                | Fecha de emisión.                                                                                                                                                                                                     |
+| `due_date`           | `AAAA-MM-DD` o vacío        | Fecha de vencimiento.                                                                                                                                                                                                 |
+| `supplier_ruc`       | 11 dígitos                  | RUC del emisor.                                                                                                                                                                                                       |
+| `supplier_name`      | texto                       | Razón social del emisor.                                                                                                                                                                                              |
+| `customer_ruc`       | 11 u 8 dígitos o vacío      | RUC o DNI del cliente.                                                                                                                                                                                                |
+| `customer_name`      | texto                       | Nombre del cliente.                                                                                                                                                                                                   |
+| `document_type`      | 2 dígitos                   | Catálogo 01 de SUNAT: `01` factura, `03` boleta, `07` nota de crédito, `08` nota de débito; `91` comprobante de un proveedor del exterior (sin serie, con `number` tal como aparece, p. ej. `IN-12345678`).           |
+| `series`             | texto                       | Serie (`F001`, `B001`, `E001`, `0001`).                                                                                                                                                                               |
+| `number`             | dígitos                     | Correlativo, tal como aparece en el comprobante.                                                                                                                                                                      |
+| `currency`           | ISO 4217                    | `PEN`, `USD`…                                                                                                                                                                                                         |
+| `subtotal`           | decimal                     | Subtotal o valor de venta.                                                                                                                                                                                            |
+| `taxable_amount`     | decimal                     | Operaciones gravadas.                                                                                                                                                                                                 |
+| `exempt_amount`      | decimal                     | Operaciones exoneradas.                                                                                                                                                                                               |
+| `unaffected_amount`  | decimal                     | Operaciones inafectas.                                                                                                                                                                                                |
+| `discount_amount`    | decimal                     | Descuentos globales.                                                                                                                                                                                                  |
+| `igv`                | decimal                     | IGV.                                                                                                                                                                                                                  |
+| `isc`                | decimal                     | ISC.                                                                                                                                                                                                                  |
+| `icbper`             | decimal                     | Impuesto a las bolsas plásticas.                                                                                                                                                                                      |
+| `other_charges`      | decimal                     | Otros cargos.                                                                                                                                                                                                         |
+| `other_taxes`        | decimal                     | Otros tributos.                                                                                                                                                                                                       |
+| `total`              | decimal                     | Importe total.                                                                                                                                                                                                        |
+| `validation_status`  | `valid`, `warning`, `error` | Resultado de la validación.                                                                                                                                                                                           |
+| `duplicate_count`    | entero                      | Otras facturas registradas con el mismo emisor, tipo, serie y número.                                                                                                                                                 |
+| `file_name`          | texto                       | Nombre del archivo original.                                                                                                                                                                                          |
+| `sha256`             | hex                         | Huella del archivo original.                                                                                                                                                                                          |
+| `data_source`        | `xml`, `ai`                 | Origen de los datos: el XML del comprobante electrónico (exacto) o la extracción con IA desde el PDF (propuesta, validada). Añadida en v0.2.0.                                                                        |
+| `sunat_status`       | texto o vacío               | Último estado del comprobante según la consulta de validez de SUNAT: `ACEPTADO`, `AUTORIZADO`, `ANULADO`, `NO EXISTE` o `NO AUTORIZADO`. Vacío si no se ha consultado (`invoicebot verify-sunat`). Añadida en v0.2.0. |
+| `prepaid_amount`     | decimal                     | Anticipos ya pagados y deducidos del total de este comprobante. Añadida en v0.2.0.                                                                                                                                    |
+| `supplier_tax_id`    | texto o vacío               | Identificador fiscal de un proveedor del exterior (EIN, VAT ID…). Añadida en v0.2.0.                                                                                                                                  |
+| `supplier_country`   | ISO 3166 o vacío            | País del proveedor (`PE` en comprobantes electrónicos XML). Añadida en v0.2.0.                                                                                                                                        |
+| `review_status`      | `pending`, `approved`       | Revisión humana: pendiente o aprobada por una persona (las rechazadas no se exportan). Añadida en v0.2.0.                                                                                                             |
+| `detraction_code`    | 3 dígitos o vacío           | Bien o servicio sujeto a detracción (SPOT), catálogo 54 de SUNAT: `037` demás servicios, `022` otros servicios empresariales, `030` construcción… Vacío si el comprobante no indica detracción. Añadida en v0.6.0.    |
+| `detraction_percent` | decimal o vacío             | Porcentaje de detracción del comprobante (`12.00`). Añadida en v0.6.0.                                                                                                                                                |
+| `detraction_amount`  | decimal o vacío             | Monto de la detracción, **en soles**, a depositar en el Banco de la Nación. Añadida en v0.6.0.                                                                                                                        |
+| `detraction_account` | texto o vacío               | Cuenta de detracciones del proveedor en el Banco de la Nación. Añadida en v0.6.0.                                                                                                                                     |
+| `exchange_rate`      | decimal o vacío             | Tipo de cambio venta usado para pasar a soles un comprobante en otra moneda (vacío en soles o si aún no se cargó). Añadida en v0.6.0.                                                                                 |
+| `exchange_rate_date` | `AAAA-MM-DD` o vacío        | Fecha del tipo de cambio: la de emisión o, si ese día no hubo publicación, la última anterior (hasta 10 días). Añadida en v0.6.0.                                                                                     |
+| `total_pen`          | decimal o vacío             | Total en soles: el mismo `total` en soles; en otra moneda, `total` × `exchange_rate` (vacío sin tipo de cambio). Añadida en v0.6.0.                                                                                   |
+| `net_payable`        | decimal o vacío             | Neto a pagar al proveedor, **en la moneda del comprobante**: `total` menos la detracción (convertida con `exchange_rate` si el comprobante no está en soles). Añadida en v0.6.0.                                      |
 
 **Importes**: punto como separador decimal, dos decimales, sin separador de miles ni símbolo de moneda (`1234.50`). Un campo vacío significa que el dato no aparece en el comprobante; no equivale a cero.
 

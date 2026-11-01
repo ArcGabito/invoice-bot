@@ -17,6 +17,7 @@ import { registerBackup } from './commands/backup.ts';
 import { registerReviewActions } from './commands/review-actions.ts';
 import { registerServe } from './commands/serve.ts';
 import { registerUsers } from './commands/users.ts';
+import { registerFx } from './commands/fx.ts';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
   version: string;
@@ -88,6 +89,7 @@ export function buildProgram(): Command {
   registerUsers(program, run);
   registerConfig(program, run);
   registerDb(program, run);
+  registerFx(program, run);
   return program;
 }
 

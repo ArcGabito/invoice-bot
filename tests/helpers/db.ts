@@ -112,6 +112,7 @@ const TABLES = [
   'file_occurrences',
   'documents',
   'bot_runs',
+  'exchange_rates',
 ] as const;
 
 /**

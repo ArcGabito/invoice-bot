@@ -45,6 +45,16 @@ const ConfigSchema = z.object({
       message: 'INVOICEBOT_SUNAT_VERIFY_ON_SCAN requiere INVOICEBOT_SUNAT_ENABLED=true',
       path: ['verifyOnScan'],
     }),
+  /**
+   * Tipo de cambio para comprobantes en otra moneda. `sunat`: `run` descarga
+   * cada día el publicado por SUNAT (archivo público, no se envía ningún dato).
+   */
+  fx: z.object({
+    sunat: z.boolean({ error: 'usa true o false' }),
+    /** null = archivo oficial de SUNAT. Para un proxy corporativo o pruebas. */
+    sunatUrl: z.url().nullable(),
+    timeoutMs: z.int().min(1000).max(120_000),
+  }),
   dataDir: z.string().min(1),
   /**
    * Base de datos SQL Server. La contraseña (INVOICEBOT_DB_PASSWORD) no se
@@ -222,6 +232,11 @@ export function loadConfig({
       delayMs: intFrom(env.INVOICEBOT_SUNAT_DELAY_MS, 0),
       authUrl: env.INVOICEBOT_SUNAT_AUTH_URL || null,
       apiUrl: env.INVOICEBOT_SUNAT_API_URL || null,
+    },
+    fx: {
+      sunat: boolFrom(env.INVOICEBOT_FX_SUNAT, true),
+      sunatUrl: env.INVOICEBOT_FX_SUNAT_URL || null,
+      timeoutMs: intFrom(env.INVOICEBOT_FX_TIMEOUT_MS, 20_000),
     },
     dataDir,
     db: {

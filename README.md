@@ -31,6 +31,8 @@ InvoiceBot es una CLI para Windows (y cualquier sistema con Node.js 24) que lee 
 | Revisión humana: pantalla web y comandos para aprobar, rechazar y corregir, con auditoría              | ✅     |
 | Instalación en una VM: pantalla de revisión en red con usuarios y HTTPS, tareas con cuenta de servicio | ✅     |
 | Docker Compose (bot, pantalla de revisión y SQL Server) para servidores Linux                          | ✅     |
+| Detracciones (SPOT): lectura del XML, tasa de SUNAT por código, monto y neto a pagar                   | ✅     |
+| Tipo de cambio de SUNAT: facturas en dólares registradas en soles                                      | ✅     |
 
 ## Instalación
 
@@ -99,31 +101,32 @@ Tiempo total: 00:01:42
 Base de datos: SQL Server localhost:1433/invoicebot
 ```
 
-| Comando                                                | Función                                                                                           |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| `invoicebot scan ./facturas`                           | Procesa los documentos de una carpeta (o un archivo).                                             |
-| `invoicebot scan ./facturas --recursive`               | Incluye subcarpetas.                                                                              |
-| `invoicebot scan ./facturas --dry-run`                 | Inspecciona los archivos sin guardar nada ni llamar a la IA.                                      |
-| `invoicebot status`                                    | Estado de la base de datos, documentos pendientes y consumo de tokens.                            |
-| `invoicebot export --month 2026-10 --csv`              | Exporta las facturas del mes a `exports/invoices-2026-10.csv`.                                    |
-| `invoicebot duplicates`                                | Lista duplicados exactos y posibles coincidencias.                                                |
-| `invoicebot review`                                    | Facturas con errores o advertencias, documentos fallidos y pendientes de OCR.                     |
-| `invoicebot retry --failed`                            | Reintenta documentos fallidos (errores transitorios o salidas inválidas).                         |
-| `invoicebot retry --pending`                           | Recupera documentos de una ejecución interrumpida.                                                |
-| `invoicebot verify-sunat`                              | Consulta en SUNAT si cada comprobante es válido y el estado del RUC emisor.                       |
-| `invoicebot run`                                       | Ciclo desatendido: reintenta, escanea la carpeta de entrada, verifica, exporta y respalda.        |
-| `invoicebot run --watch`                               | Repite el ciclo cada `INVOICEBOT_RUN_INTERVAL_MINUTES` hasta detenerlo.                           |
-| `invoicebot backup`                                    | Copia verificada de la base de datos (`--list` para ver las existentes).                          |
-| `invoicebot serve --open`                              | Abre la **pantalla de revisión** en el navegador.                                                 |
-| `invoicebot user add <usuario> --name "Nombre"`        | Usuario de la pantalla de revisión en red (`list`, `reset-password`, `disable`, `enable`).        |
-| `invoicebot show <factura>`                            | Datos, incidencias e historial de una factura.                                                    |
-| `invoicebot approve <factura>`                         | Aprueba: confirma los datos y resuelve las advertencias (`--force -n "motivo"` si tiene errores). |
-| `invoicebot correct <factura> campo=valor…`            | Corrige datos y revalida (`total=118.00 issue_date=15/10/2026`).                                  |
-| `invoicebot reject <factura> -r "motivo"`              | Rechaza: deja de exportarse y de aparecer en la bandeja.                                          |
-| `invoicebot reopen <factura>` · `resolve <incidencia>` | Devuelve a pendiente · da por resuelta una incidencia concreta.                                   |
-| `invoicebot db init` · `db migrate` · `db status`      | Crea la base de datos y su usuario · aplica migraciones · muestra la versión del esquema.         |
-| `invoicebot doctor`                                    | Comprueba Node.js, SQL Server, lectura de PDF, OCR y conexión con la IA.                          |
-| `invoicebot config`                                    | Muestra la configuración efectiva sin revelar secretos.                                           |
+| Comando                                                | Función                                                                                              |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `invoicebot scan ./facturas`                           | Procesa los documentos de una carpeta (o un archivo).                                                |
+| `invoicebot scan ./facturas --recursive`               | Incluye subcarpetas.                                                                                 |
+| `invoicebot scan ./facturas --dry-run`                 | Inspecciona los archivos sin guardar nada ni llamar a la IA.                                         |
+| `invoicebot status`                                    | Estado de la base de datos, documentos pendientes y consumo de tokens.                               |
+| `invoicebot export --month 2026-10 --csv`              | Exporta las facturas del mes a `exports/invoices-2026-10.csv`.                                       |
+| `invoicebot duplicates`                                | Lista duplicados exactos y posibles coincidencias.                                                   |
+| `invoicebot review`                                    | Facturas con errores o advertencias, documentos fallidos y pendientes de OCR.                        |
+| `invoicebot retry --failed`                            | Reintenta documentos fallidos (errores transitorios o salidas inválidas).                            |
+| `invoicebot retry --pending`                           | Recupera documentos de una ejecución interrumpida.                                                   |
+| `invoicebot verify-sunat`                              | Consulta en SUNAT si cada comprobante es válido y el estado del RUC emisor.                          |
+| `invoicebot run`                                       | Ciclo desatendido: reintenta, escanea la carpeta de entrada, verifica, exporta y respalda.           |
+| `invoicebot run --watch`                               | Repite el ciclo cada `INVOICEBOT_RUN_INTERVAL_MINUTES` hasta detenerlo.                              |
+| `invoicebot fx set 15/10/2026 3.750`                   | Registra el tipo de cambio de un día (`fx fetch` descarga el de hoy, `fx import tc.csv`, `fx list`). |
+| `invoicebot backup`                                    | Copia verificada de la base de datos (`--list` para ver las existentes).                             |
+| `invoicebot serve --open`                              | Abre la **pantalla de revisión** en el navegador.                                                    |
+| `invoicebot user add <usuario> --name "Nombre"`        | Usuario de la pantalla de revisión en red (`list`, `reset-password`, `disable`, `enable`).           |
+| `invoicebot show <factura>`                            | Datos, incidencias e historial de una factura.                                                       |
+| `invoicebot approve <factura>`                         | Aprueba: confirma los datos y resuelve las advertencias (`--force -n "motivo"` si tiene errores).    |
+| `invoicebot correct <factura> campo=valor…`            | Corrige datos y revalida (`total=118.00 issue_date=15/10/2026`).                                     |
+| `invoicebot reject <factura> -r "motivo"`              | Rechaza: deja de exportarse y de aparecer en la bandeja.                                             |
+| `invoicebot reopen <factura>` · `resolve <incidencia>` | Devuelve a pendiente · da por resuelta una incidencia concreta.                                      |
+| `invoicebot db init` · `db migrate` · `db status`      | Crea la base de datos y su usuario · aplica migraciones · muestra la versión del esquema.            |
+| `invoicebot doctor`                                    | Comprueba Node.js, SQL Server, lectura de PDF, OCR y conexión con la IA.                             |
+| `invoicebot config`                                    | Muestra la configuración efectiva sin revelar secretos.                                              |
 
 Opciones globales: `--provider <anthropic|ollama|mock>`, `--data-dir <ruta>`, `--concurrency <n>`, `--json` (salida para automatización) y `--verbose`.
 
@@ -169,11 +172,12 @@ La guía completa para TI está en [docs/instalacion-vm.md](docs/instalacion-vm.
 
 `invoicebot run` hace un ciclo completo sin intervención:
 
+1. Descarga el tipo de cambio del dólar publicado hoy por SUNAT (si `INVOICEBOT_FX_SUNAT=true`, por defecto) y lo aplica a las facturas en dólares que lo esperaban. Si SUNAT no responde, el ciclo sigue.
 1. Reintenta los documentos que fallaron antes por errores temporales (dentro de `INVOICEBOT_MAX_ATTEMPTS`).
-2. Escanea `INVOICEBOT_INBOX_DIR` (con subcarpetas). Puede ser una carpeta de **OneDrive o SharePoint sincronizada**, a la que los usuarios arrastran los comprobantes.
-3. Verifica en SUNAT si `INVOICEBOT_SUNAT_VERIFY_ON_SCAN=true`.
-4. Exporta el mes actual y el anterior si `INVOICEBOT_RUN_EXPORT=xlsx` o `csv` (las facturas de fin de mes llegan en los primeros días del siguiente). Con `INVOICEBOT_EXPORT_DIR` en una carpeta compartida, el equipo ve el Excel actualizado.
-5. Hace una copia de seguridad verificada si la última tiene más de `INVOICEBOT_BACKUP_INTERVAL_HOURS` (24 por defecto) y conserva las `INVOICEBOT_BACKUP_RETENTION` más recientes (14).
+1. Escanea `INVOICEBOT_INBOX_DIR` (con subcarpetas). Puede ser una carpeta de **OneDrive o SharePoint sincronizada**, a la que los usuarios arrastran los comprobantes.
+1. Verifica en SUNAT si `INVOICEBOT_SUNAT_VERIFY_ON_SCAN=true`.
+1. Exporta el mes actual y el anterior si `INVOICEBOT_RUN_EXPORT=xlsx` o `csv` (las facturas de fin de mes llegan en los primeros días del siguiente). Con `INVOICEBOT_EXPORT_DIR` en una carpeta compartida, el equipo ve el Excel actualizado.
+1. Hace una copia de seguridad verificada si la última tiene más de `INVOICEBOT_BACKUP_INTERVAL_HOURS` (24 por defecto) y conserva las `INVOICEBOT_BACKUP_RETENTION` más recientes (14).
 
 Cada ciclo queda en la tabla `bot_runs` (`invoicebot status` muestra las últimas) y, con `INVOICEBOT_LOG_DIR`, en un log diario en JSON que se borra tras `INVOICEBOT_LOG_RETENTION_DAYS` (30). Un candado en SQL Server (`sp_getapplock`) impide dos ciclos a la vez, aunque corran en máquinas distintas: si la tarea programada coincide con un ciclo largo, el nuevo se omite con código 0. Si el proceso muere, SQL Server libera el candado al cerrarse su conexión.
 
@@ -244,10 +248,27 @@ Las incidencias se guardan individualmente en `validation_issues`. Una factura c
 | Posible duplicado de otro documento                                                                               | advertencia |
 | Comprobante del exterior (tipo 91) con IGV o con RUC peruano                                                      | advertencia |
 | El modelo dudó si era un comprobante, pero los datos están completos                                              | advertencia |
+| Comprobante en otra moneda sin tipo de cambio cargado para su fecha (`FX_RATE_MISSING`)                           | advertencia |
+| Detracción incompleta, con porcentaje distinto a la tasa de SUNAT o con monto que no corresponde                  | advertencia |
+| Detracción con código sin tasa registrada, o servicio del Anexo 3 por S/ 700 o menos                              | informativa |
 
 El IGV no se calcula sobre todo el subtotal cuando hay operaciones exoneradas o inafectas: se usa el desglose tributario del comprobante. La aritmética se hace con enteros en céntimos y una tolerancia explícita (`INVOICEBOT_AMOUNT_TOLERANCE`, 0.02 por defecto).
 
 > Validar matemáticamente un RUC **no** confirma que la empresa exista, esté activa ni que el comprobante sea auténtico. Para eso está `invoicebot verify-sunat`.
+
+### Detracciones y tipo de cambio
+
+**Detracciones (SPOT)**: InvoiceBot lee del XML el código del bien o servicio (catálogo 54), el porcentaje, el monto y la cuenta del proveedor en el Banco de la Nación; en un PDF, la IA los extrae solo si el comprobante dice expresamente que la operación está sujeta a detracción. Comprueba que el porcentaje sea la tasa de SUNAT para ese código (Resolución 183-2004/SUNAT y modificatorias) y que el monto sea ese porcentaje del total con IGV, en soles (se acepta el redondeo a soles enteros). No decide si una compra _debería_ estar sujeta, porque eso depende de qué se compró: solo valida lo que declara el comprobante. El Excel y el CSV traen el monto a depositar y el neto a pagar al proveedor.
+
+**Tipo de cambio**: las facturas en dólares se registran en soles con el tipo de cambio venta publicado por SUNAT para la fecha de emisión o, si ese día no hubo publicación (fines de semana y feriados), el último anterior (hasta 10 días). SUNAT publica en un archivo público solo el del día, así que InvoiceBot va formando el histórico: `invoicebot run` lo descarga en cada ciclo. Para fechas anteriores a la instalación, cárgalo a mano o desde un CSV (fecha, compra, venta; por ejemplo copiado de la consulta de SUNAT):
+
+```bash
+invoicebot fx set 15/10/2026 3.750 --compra 3.741
+invoicebot fx import tipos-de-cambio-2026.csv
+invoicebot fx list --month 2026-10
+```
+
+Una factura sin tipo de cambio queda con la advertencia `FX_RATE_MISSING`; al cargarlo se completa sola y se recalculan sus incidencias de detracción. Un tipo de cambio cargado a mano o por CSV nunca se reemplaza con la descarga de SUNAT.
 
 ### Verificación en SUNAT
 

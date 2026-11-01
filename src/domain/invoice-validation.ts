@@ -14,9 +14,11 @@ import type {
   ValidationStatus,
 } from './invoice.ts';
 import { validateRuc } from './ruc-validator.ts';
+import { checkDetraction } from './detraction.ts';
+import { checkExchangeRate } from './exchange-rate.ts';
 
 /** Versión de las reglas. Se guarda con cada factura para poder auditar resultados. */
-export const VALIDATION_RULES_VERSION = '2026.10.2';
+export const VALIDATION_RULES_VERSION = '2026.10.3';
 
 /**
  * Tasas de IGV admitidas, en puntos básicos: 18 % general (16 % IGV + 2 % IPM)
@@ -495,11 +497,18 @@ export function validateInvoice(
     toleranceCents = 2,
     today = new Date().toISOString().slice(0, 10),
     igvRatesBp = DEFAULT_IGV_RATES_BP,
+    exchangeRate,
   }: {
     normalizationIssues?: readonly NormalizationIssue[];
     toleranceCents?: number;
     today?: string;
     igvRatesBp?: readonly number[];
+    /**
+     * Tipo de cambio de la fecha de emisión para comprobantes en otra moneda.
+     * null: se buscó y no hay (advertencia FX_RATE_MISSING). Sin indicar: no
+     * se comprueba (validación sin acceso a la tabla de tipos de cambio).
+     */
+    exchangeRate?: { rate: number; date: string } | null;
   } = {},
 ): { status: ValidationStatus; issues: NewIssue[] } {
   const issues = [
@@ -508,8 +517,23 @@ export function validateInvoice(
     ...checkDates(invoice, today),
     ...checkIdentification(invoice),
     ...checkAmounts(invoice, normalizationIssues, toleranceCents, igvRatesBp),
+    ...exchangeDependentIssues(invoice, exchangeRate),
   ];
   return { status: statusFromIssues(issues), issues };
+}
+
+/**
+ * Incidencias que dependen del tipo de cambio (FX_* y DETRACTION_*): se
+ * recalculan solas cuando se carga el tipo de cambio que faltaba.
+ */
+export function exchangeDependentIssues(
+  invoice: InvoiceData,
+  exchangeRate: { rate: number; date: string } | null | undefined,
+): NewIssue[] {
+  return [
+    ...(exchangeRate === undefined ? [] : checkExchangeRate(invoice, exchangeRate)),
+    ...checkDetraction(invoice, { exchangeRate: exchangeRate?.rate ?? null }),
+  ];
 }
 
 export function statusFromIssues(issues: readonly { severity: string }[]): ValidationStatus {

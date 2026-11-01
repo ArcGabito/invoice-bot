@@ -74,6 +74,8 @@ export const AMOUNT_FIELDS = Object.freeze([
   'total',
   /** Anticipos aplicados: el total ya los descuenta. */
   'prepaid_amount',
+  /** Detracción a depositar en el Banco de la Nación. Siempre en soles, sea cual sea la moneda. */
+  'detraction_amount',
 ] as const);
 
 export type AmountField = (typeof AMOUNT_FIELDS)[number];
@@ -93,6 +95,12 @@ export interface InvoiceData extends Record<AmountCentsField, number | null> {
   issue_date: string | null;
   due_date: string | null;
   currency: string | null;
+  /** Detracción (SPOT): código del catálogo 54 de SUNAT, p. ej. "037". */
+  detraction_code: string | null;
+  /** Porcentaje de detracción declarado, p. ej. 12. */
+  detraction_percent: number | null;
+  /** Cuenta de detracciones del proveedor en el Banco de la Nación. */
+  detraction_account: string | null;
 }
 
 /** Salida cruda de un extractor (modelo de IA o XML), antes de normalizar. */
@@ -245,6 +253,22 @@ function normalizeCountry(value: unknown): string | null {
   return COUNTRY_CODES[text.toUpperCase()] ?? text;
 }
 
+/** "037", "37" o "Código 037" → "037". */
+export function normalizeDetractionCode(value: unknown): string | null {
+  const text = cleanText(value);
+  if (text === null) return null;
+  const digits = /(\d{1,3})/.exec(text)?.[1];
+  return digits ? digits.padStart(3, '0') : null;
+}
+
+/** "12", "12.00", "12 %" o "12,5" → 12 / 12.5. null si no es un porcentaje entre 0 y 100. */
+export function normalizePercent(value: unknown): number | null {
+  const text = cleanText(value)?.replace('%', '').replace(',', '.').trim();
+  if (!text || !/^\d{1,3}(\.\d{1,2})?$/.test(text)) return null;
+  const n = Number(text);
+  return n > 0 && n <= 100 ? n : null;
+}
+
 /**
  * ¿La extracción tiene los datos mínimos de un comprobante? Tipo conocido,
  * número, emisor identificado (RUC, identificador fiscal o nombre) y total.
@@ -284,6 +308,14 @@ export function normalizeInvoice(extraction: RawExtraction): {
     }
   }
 
+  const detractionPercent = normalizePercent(extraction.detraction_percent);
+  if (detractionPercent === null && cleanText(extraction.detraction_percent) !== null) {
+    normalizationIssues.push({
+      field: 'detraction_percent',
+      value: String(extraction.detraction_percent),
+    });
+  }
+
   const series = cleanText(extraction.series)?.toUpperCase() ?? null;
   const number = cleanText(extraction.number)?.replace(/\s/g, '') ?? null;
 
@@ -301,6 +333,9 @@ export function normalizeInvoice(extraction: RawExtraction): {
       issue_date: normalizeDate(extraction.issue_date),
       due_date: normalizeDate(extraction.due_date),
       currency: normalizeCurrency(extraction.currency),
+      detraction_code: normalizeDetractionCode(extraction.detraction_code),
+      detraction_percent: detractionPercent,
+      detraction_account: cleanText(extraction.detraction_account),
       ...amounts,
     },
     normalizationIssues,

@@ -2,6 +2,23 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
 
+## [Sin publicar]
+
+### Añadido
+
+- **Detracciones (SPOT)**: se leen del XML de SUNAT (código del catálogo 54, porcentaje, monto y cuenta del Banco de la Nación) y, en PDF, con la IA si el comprobante indica que está sujeto. Nuevas incidencias: `DETRACTION_INCOMPLETE`, `DETRACTION_RATE_MISMATCH` y `DETRACTION_AMOUNT_MISMATCH` (advertencias), y `DETRACTION_UNKNOWN_CODE` y `DETRACTION_BELOW_THRESHOLD` (informativas). Las tasas son las vigentes de SUNAT.
+- **Tipo de cambio**: tabla `exchange_rates`; las facturas en otra moneda guardan el tipo de cambio venta de su fecha de emisión (o el último publicado hasta 10 días antes). Sin tipo de cambio quedan con la advertencia `FX_RATE_MISSING`, que se resuelve sola al cargarlo.
+- `invoicebot run` descarga el tipo de cambio del día de SUNAT antes de escanear (`INVOICEBOT_FX_SUNAT`, `INVOICEBOT_FX_SUNAT_URL`, `INVOICEBOT_FX_TIMEOUT_MS`). Un fallo de SUNAT no detiene el ciclo.
+- Comandos `invoicebot fx fetch`, `fx set`, `fx import` (CSV) y `fx list`. Los tipos de cambio cargados a mano o por CSV no se reemplazan con la descarga de SUNAT.
+- Columnas nuevas al final del CSV y del Excel: `detraction_code`, `detraction_percent`, `detraction_amount`, `detraction_account`, `exchange_rate`, `exchange_rate_date`, `total_pen` y `net_payable`. La vista `v_invoices` también las incluye.
+- Corregir la fecha de emisión o la moneda de una factura vuelve a buscar su tipo de cambio.
+
+### Cambiado
+
+- Migración 2 del esquema (se aplica con `invoicebot db migrate`, con copia previa automática).
+- Versiones: reglas de validación `2026.10.3`, prompt `invoice-extraction/2026-10-31.3`, lector UBL `ubl-2.1-sunat/2026-10-31.1`.
+- La fecha de vencimiento del XML se toma de cualquier término de pago que la tenga, no solo del primero.
+
 ## [0.5.0] - 2026-10-31
 
 ### Cambios incompatibles

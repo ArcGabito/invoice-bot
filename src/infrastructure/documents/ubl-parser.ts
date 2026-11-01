@@ -12,7 +12,7 @@ type XmlNode = any;
  * Versión del lector UBL. Se guarda en extraction_runs.prompt_version para
  * poder auditar con qué lógica se leyó cada XML.
  */
-export const UBL_PARSER_VERSION = 'ubl-2.1-sunat/2026-10-30.1';
+export const UBL_PARSER_VERSION = 'ubl-2.1-sunat/2026-10-31.1';
 
 /** Tipo de comprobante según el elemento raíz del XML. */
 const ROOT_DOCUMENT_TYPES: Record<string, string | null> = {
@@ -44,6 +44,8 @@ const ARRAY_ELEMENTS = new Set([
   'PartyLegalEntity',
   'PartyName',
   'Note',
+  'PaymentTerms',
+  'PaymentMeans',
 ]);
 
 const parser = new XMLParser({
@@ -123,6 +125,37 @@ function readTaxes(root: XmlNode) {
   return { taxable, tax, schemes: Object.keys(byScheme) };
 }
 
+const isDetraction = (node: XmlNode) => /^detracci[oó]n$/i.test(text(node?.ID) ?? '');
+
+/**
+ * Detracción según la guía de elaboración del XML de SUNAT:
+ * cac:PaymentTerms con ID "Detraccion" (código del catálogo 54 en
+ * PaymentMeansID, PaymentPercent y Amount en soles) y cac:PaymentMeans con
+ * ID "Detraccion" (cuenta del Banco de la Nación en PayeeFinancialAccount).
+ */
+function readDetraction(root: XmlNode, notes: string[]) {
+  const terms = (root.PaymentTerms ?? []).find(isDetraction);
+  const means = (root.PaymentMeans ?? []).find(isDetraction);
+  if (!terms && !means) {
+    return {
+      detraction_code: null,
+      detraction_percent: null,
+      detraction_amount: null,
+      detraction_account: null,
+    };
+  }
+  const currency = terms?.Amount?.['@_currencyID'];
+  if (currency && currency !== 'PEN') {
+    notes.push(`El monto de detracción viene en ${currency}; SUNAT lo exige en soles.`);
+  }
+  return {
+    detraction_code: text(terms?.PaymentMeansID),
+    detraction_percent: text(terms?.PaymentPercent),
+    detraction_amount: text(terms?.Amount),
+    detraction_account: text(means?.PayeeFinancialAccount?.ID),
+  };
+}
+
 /**
  * Lee un comprobante electrónico SUNAT en UBL 2.1 (factura, boleta, nota de
  * crédito o de débito) y devuelve los datos con la misma forma que la
@@ -177,7 +210,10 @@ export function parseUbl(buffer: Buffer): StructuredDocument {
     series,
     number,
     issue_date: text(root.IssueDate),
-    due_date: text(root.DueDate) ?? text(first(root.PaymentTerms)?.PaymentDueDate),
+    // Al crédito, la primera cuota (PaymentTerms "FormaPago") lleva la fecha de vencimiento.
+    due_date:
+      text(root.DueDate) ??
+      text((root.PaymentTerms ?? []).find((t: XmlNode) => t.PaymentDueDate)?.PaymentDueDate),
     currency: text(root.DocumentCurrencyCode),
     subtotal: text(totals.LineExtensionAmount),
     taxable_amount: taxable(TAX_SCHEMES.IGV),
@@ -191,6 +227,7 @@ export function parseUbl(buffer: Buffer): StructuredDocument {
     other_taxes: sumAmounts([tax(TAX_SCHEMES.OTHER), tax(TAX_SCHEMES.IVAP)]),
     total: text(totals.PayableAmount),
     prepaid_amount: text(totals.PrepaidAmount),
+    ...readDetraction(root, notes),
     notes,
   };
   return { kind: 'invoice', data: ExtractionSchema.parse(data) };
