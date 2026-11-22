@@ -34,6 +34,9 @@ ROOT = Path(__file__).resolve().parents[1]
 TODAY = "2026-10-31"
 
 _TABLES = (
+    "portal_uploads",
+    "portal_tokens",
+    "supplier_contacts",
     "payments",
     "cost_centers",
     "sire_entries",

@@ -34,6 +34,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 
 from invoicebot import __version__
 from invoicebot.api.security import (
+    SAFE_METHODS,
     LoginThrottle,
     Principal,
     authenticate_request,
@@ -46,6 +47,7 @@ from invoicebot.api.security import (
 from invoicebot.application import (
     approvals,
     events,
+    insights,
     integrations,
     payables,
     purchasing,
@@ -281,6 +283,16 @@ class CostCenterBody(BaseModel):
     code: str = Field(min_length=1, max_length=30)
     name: str = Field(min_length=1, max_length=150)
     destination_account: str | None = Field(default=None, max_length=20)
+
+
+class PortalLoginBody(BaseModel):
+    ruc: str = Field(pattern=r"^\d{11}$")
+    email: str = Field(min_length=3, max_length=254)
+
+
+class ContactBody(BaseModel):
+    supplier_ruc: str = Field(pattern=r"^\d{11}$")
+    email: str = Field(min_length=3, max_length=254)
 
 
 class JobBody(BaseModel):
@@ -1337,6 +1349,136 @@ def create_app(context: AppContext | None = None) -> FastAPI:
             source="bank-bot" if principal.kind == "api_key" else "manual",
             created_by=principal.signature,
         )
+
+    # --- Portal de proveedores ---------------------------------------------------------------
+
+    portal_cookie = "__Host-invoicebot-portal"
+
+    def portal_cookie_name(request: Request) -> str:
+        secure = is_secure_request(request, ctx.config.serve.cookie_secure)
+        return portal_cookie if secure else "invoicebot_portal"
+
+    def portal_supplier(request: Request) -> tuple[str, str]:
+        found = insights.session_supplier(ctx, request.cookies.get(portal_cookie_name(request)))
+        if found is None:
+            raise HTTPException(401, "Ingresa con el enlace que te enviamos por correo")
+        if (
+            request.method not in SAFE_METHODS
+            and request.headers.get("x-requested-with") != "portal"
+        ):
+            raise HTTPException(403, "Solicitud no válida")
+        return found
+
+    Supplier = Annotated[tuple[str, str], Depends(portal_supplier)]
+
+    @app.get("/portal", include_in_schema=False, response_class=HTMLResponse)
+    def portal_page(request: Request) -> Response:
+        found = insights.session_supplier(ctx, request.cookies.get(portal_cookie_name(request)))
+        return templates.TemplateResponse(
+            request, "portal.html", {"supplier": found, "version": __version__}
+        )
+
+    @app.post("/portal/api/login", include_in_schema=False)
+    def portal_login(body: PortalLoginBody, request: Request) -> dict[str, Any]:
+        """Pide el enlace de acceso. Responde igual exista o no el contacto (sin enumerar)."""
+        keys = [f"portal-ip:{client_ip(request)}", f"portal-ruc:{body.ruc}"]
+        throttle: LoginThrottle = app.state.throttle
+        if throttle.is_locked(keys):
+            raise HTTPException(429, "Demasiados intentos. Espera unos minutos.")
+        if not insights.request_login(ctx, supplier_ruc=body.ruc, email=body.email):
+            throttle.record_failure(keys)
+        return {
+            "ok": True,
+            "message": "Si el correo está registrado, te enviamos un enlace de acceso.",
+        }
+
+    @app.get("/portal/login/{token}", include_in_schema=False)
+    def portal_open(token: str, request: Request) -> Response:
+        opened = insights.open_session(ctx, token)
+        if opened is None:
+            return RedirectResponse("/portal?expired=1", status_code=303)
+        session_token, _ruc = opened
+        response = RedirectResponse("/portal", status_code=303)
+        secure = is_secure_request(request, ctx.config.serve.cookie_secure)
+        response.set_cookie(
+            portal_cookie_name(request),
+            session_token,
+            max_age=insights.SESSION_HOURS * 3600,
+            httponly=True,
+            samesite="lax",
+            secure=secure,
+            path="/",
+        )
+        return response
+
+    @app.post("/portal/api/logout", include_in_schema=False)
+    def portal_logout(request: Request, _: Supplier) -> Response:
+        insights.close_session(ctx, request.cookies.get(portal_cookie_name(request)))
+        response = ApiResponse({"ok": True})
+        response.delete_cookie(portal_cookie_name(request), path="/")
+        return response
+
+    @app.get("/portal/api/invoices", include_in_schema=False)
+    def portal_invoices(supplier: Supplier) -> dict[str, Any]:
+        ruc, email = supplier
+        return {"supplier_ruc": ruc, "email": email, "items": insights.supplier_invoices(ctx, ruc)}
+
+    @app.post("/portal/api/documents", include_in_schema=False, status_code=202)
+    async def portal_upload(
+        supplier: Supplier, files: Annotated[list[UploadFile], File()]
+    ) -> dict[str, Any]:
+        """El proveedor sube sus XML y PDF; se procesan como cualquier comprobante."""
+        from starlette.concurrency import run_in_threadpool
+
+        ruc, email = supplier
+        limit = ctx.config.serve.upload_max_mb * 1024 * 1024
+        if not files or len(files) > 20:
+            raise HTTPException(400, "Envía entre 1 y 20 archivos")
+        batch = (
+            Path(ctx.config.upload_dir)
+            / "portal"
+            / ruc
+            / (datetime.now(UTC).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(4))
+        )
+        saved = 0
+        for upload in files:
+            name = safe_file_name(upload.filename or "documento")
+            if Path(name).suffix.lower() not in (".xml", ".pdf"):
+                raise HTTPException(415, f"Solo XML y PDF ({name})")
+            content = await upload.read(limit + 1)
+            if len(content) > limit:
+                raise HTTPException(413, f"{name} supera {ctx.config.serve.upload_max_mb} MB")
+            batch.mkdir(parents=True, exist_ok=True)
+            (batch / name).write_bytes(content)
+            saved += 1
+        result = await run_in_threadpool(
+            ctx.jobs.enqueue,
+            "documents.scan",
+            {"root": str(batch), "recursive": False},
+            created_by=f"portal:{ruc}",
+        )
+        await run_in_threadpool(
+            insights.record_upload,
+            ctx,
+            supplier_ruc=ruc,
+            email=email,
+            folder=str(batch),
+            files=saved,
+            job_id=result.id,
+        )
+        return {"files": saved, "job_id": result.id}
+
+    @app.post("/api/v1/supplier-contacts", tags=["portal"], status_code=201)
+    def create_contact(body: ContactBody, _: Purchasing) -> dict[str, Any]:
+        return insights.add_contact(ctx, supplier_ruc=body.supplier_ruc, email=body.email)
+
+    # --- Indicadores ---------------------------------------------------------------------------
+
+    @app.get("/api/v1/analytics/kpis", tags=["indicadores"])
+    def analytics_kpis(
+        principal: Reader, month: Annotated[str, Query(pattern=r"^\d{4}-\d{2}$")]
+    ) -> dict[str, Any]:
+        return insights.kpis(ctx, month=month, company_ids=principal.company_ids)
 
     # --- Webhooks y eventos ------------------------------------------------------------------
 

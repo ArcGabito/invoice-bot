@@ -166,12 +166,19 @@ class AppContext:
 
     def after_invoice_saved(self, invoice_id: int) -> None:
         """Cada factura guardada: acuse de recibo (evento) y match de compras (cola `default`)."""
+        from invoicebot.application.insights import check_fraud, learn_contact
         from invoicebot.application.payables import publish_received
 
-        try:
-            publish_received(self, invoice_id)
-        except Exception as error:
-            self.logger.warning("no se pudo publicar invoice.received #%s: %s", invoice_id, error)
+        # Antes del match: una señal de fraude impide la aprobación automática.
+        for step, action in (
+            ("antifraude", check_fraud),
+            ("contacto del proveedor", learn_contact),
+            ("invoice.received", publish_received),
+        ):
+            try:
+                action(self, invoice_id)
+            except Exception as error:
+                self.logger.warning("%s de #%s falló: %s", step, invoice_id, error)
         try:
             self.jobs.enqueue(
                 "purchasing.match", {"invoice_id": invoice_id}, dedupe_key=f"match:{invoice_id}"
