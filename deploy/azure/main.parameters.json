@@ -4,7 +4,11 @@
   "parameters": {
     "name": { "value": "invoicebot" },
     "image": { "value": "ghcr.io/arcgabito/invoice-bot:latest" },
-    "cycleCron": { "value": "*/15 * * * *" },
+    "mode": { "value": "queue" },
+    "schedulerCron": { "value": "*/2 * * * *" },
+    "deployRedis": { "value": true },
+    "redisSku": { "value": "Balanced_B0" },
+    "workerMaxReplicas": { "value": 5 },
     "apiMinReplicas": { "value": 1 },
     "deploySql": { "value": true },
     "aiProvider": { "value": "anthropic" },

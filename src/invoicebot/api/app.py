@@ -4,6 +4,8 @@ Pensada para correr detrás de un proxy HTTPS (Azure Container Apps, Caddy/Nginx
 un VPS) o con TLS propio (INVOICEBOT_SERVE_TLS_CERT/_KEY en una VM Windows).
 """
 
+import asyncio
+import hashlib
 import json
 import secrets
 import threading
@@ -14,9 +16,17 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -34,7 +44,6 @@ from invoicebot.api.security import (
 )
 from invoicebot.application import review
 from invoicebot.application.exchange_rates import save_exchange_rates
-from invoicebot.application.processing import scan_invoices
 from invoicebot.application.reports import build_export, check_month, find_duplicates
 from invoicebot.application.users import authenticate
 from invoicebot.application.verify_sunat import verify_sunat
@@ -146,6 +155,24 @@ class SunatBody(BaseModel):
     limit: int | None = Field(default=50, ge=1, le=1000)
 
 
+class JobBody(BaseModel):
+    task: str = Field(max_length=100)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+def _idempotency(principal: Principal, key: str | None) -> str | None:
+    """Clave por cliente: dos sistemas pueden usar el mismo valor sin pisarse."""
+    if not key:
+        return None
+    if len(key) > 200:
+        raise HTTPException(400, "Idempotency-Key admite hasta 200 caracteres")
+    digest = hashlib.sha256(f"{principal.signature}|{key}".encode()).hexdigest()
+    return f"api:{digest[:48]}"
+
+
+_FINAL_JOB_STATUSES = ("succeeded", "failed", "cancelled")
+
+
 def create_app(context: AppContext | None = None) -> FastAPI:
     ctx = context or AppContext()
 
@@ -210,12 +237,56 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         try:
             status = schema_status(ctx.db)
             ready = not status["pending"] and not status["ahead"]
-            return ApiResponse(
-                {"status": "ok" if ready else "migrating", "schema": status},
-                status_code=200 if ready else 503,
-            )
         except Exception as error:
             return ApiResponse({"status": "error", "detail": error_message(error)}, status_code=503)
+        queue: dict[str, str] = {"backend": ctx.config.queue.backend}
+        try:
+            queue["detail"] = ctx.queue.ping()
+        except Exception as error:
+            ready = False
+            queue["error"] = error_message(error)
+        return ApiResponse(
+            {"status": "ok" if ready else "not_ready", "schema": status, "queue": queue},
+            status_code=200 if ready else 503,
+        )
+
+    @app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
+    def metrics(_: Auth) -> Response:
+        """Métricas en formato Prometheus (requiere una clave de API de lectura)."""
+        lines = [
+            "# HELP invoicebot_info Versión de InvoiceBot.",
+            "# TYPE invoicebot_info gauge",
+            f'invoicebot_info{{version="{__version__}",queue="{ctx.config.queue.backend}"}} 1',
+            "# HELP invoicebot_jobs Trabajos por tarea y estado (terminados: últimas 24 h).",
+            "# TYPE invoicebot_jobs gauge",
+        ]
+        repo = ctx.job_repository
+        for row in repo.counts():
+            lines.append(
+                f'invoicebot_jobs{{task="{row["task"]}",status="{row["status"]}"}} {row["n"]}'
+            )
+        oldest = repo.oldest_waiting_seconds()
+        lines += [
+            "# HELP invoicebot_job_oldest_wait_seconds Espera del trabajo listo más antiguo.",
+            "# TYPE invoicebot_job_oldest_wait_seconds gauge",
+            f"invoicebot_job_oldest_wait_seconds {oldest or 0:.3f}",
+        ]
+        try:
+            sizes = ctx.queue.sizes()
+        except Exception as error:
+            ctx.logger.warning("métricas de Redis no disponibles: %s", error_message(error))
+            sizes = {}
+        if sizes:
+            lines += [
+                "# HELP invoicebot_queue_messages Mensajes en Redis por cola y estado.",
+                "# TYPE invoicebot_queue_messages gauge",
+            ]
+            for queue_name, values in sizes.items():
+                for state, value in values.items():
+                    lines.append(
+                        f'invoicebot_queue_messages{{queue="{queue_name}",state="{state}"}} {value}'
+                    )
+        return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
     # --- Pantalla de revisión --------------------------------------------------------
 
@@ -466,7 +537,12 @@ def create_app(context: AppContext | None = None) -> FastAPI:
 
     # --- Documentos (integración RPA) ------------------------------------------------
 
-    @app.post("/api/v1/documents", tags=["documentos"], status_code=201)
+    @app.post(
+        "/api/v1/documents",
+        tags=["documentos"],
+        status_code=201,
+        responses={202: {"description": "Recibidos y encolados (cola Redis)"}},
+    )
     async def upload_documents(
         principal: Writer,
         files: Annotated[
@@ -474,8 +550,28 @@ def create_app(context: AppContext | None = None) -> FastAPI:
             File(description="XML, PDF, PNG o JPG; el XML y su PDF juntos se vinculan"),
         ],
         process: Annotated[bool, Form()] = True,
-    ) -> dict[str, Any]:
-        """Recibe comprobantes de otro sistema (email-bot, ERP, un escáner) y los procesa."""
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ) -> Response:
+        """Recibe comprobantes de otro sistema (email-bot, ERP, un escáner) y los procesa.
+
+        Con la cola Redis responde 202 con el trabajo (`GET /api/v1/jobs/{id}`); sin Redis,
+        201 con el resumen. Repetir la petición con la misma cabecera `Idempotency-Key`
+        devuelve el mismo trabajo sin volver a guardar los archivos.
+        """
+        from starlette.concurrency import run_in_threadpool
+
+        idem = _idempotency(principal, idempotency_key)
+        if idem:
+            previous = await run_in_threadpool(ctx.job_repository.get_by_idempotency_key, idem)
+            if previous is not None:
+                return ApiResponse(
+                    {
+                        "job": previous,
+                        "processed": previous["status"] == "succeeded",
+                        "replayed": True,
+                    },
+                    status_code=200,
+                )
         limit = ctx.config.serve.upload_max_mb * 1024 * 1024
         if not files or len(files) > 50:
             raise HTTPException(400, "Envía entre 1 y 50 archivos")
@@ -507,16 +603,23 @@ def create_app(context: AppContext | None = None) -> FastAPI:
             extra={"by": principal.signature, "files": len(saved)},
         )
         if not process:
-            return {"folder": str(batch), "files": saved, "processed": False}
-        from starlette.concurrency import run_in_threadpool
-
-        summary = await run_in_threadpool(scan_invoices, ctx.deps, root=str(batch), recursive=False)
-        return {
-            "folder": str(batch),
-            "files": saved,
-            "processed": True,
-            "summary": summary.as_dict(),
-        }
+            return ApiResponse(
+                {"folder": str(batch), "files": saved, "processed": False}, status_code=201
+            )
+        result = await run_in_threadpool(
+            ctx.jobs.enqueue,
+            "documents.scan",
+            {"root": str(batch), "recursive": False},
+            idempotency_key=idem,
+            created_by=principal.signature,
+        )
+        job = await run_in_threadpool(ctx.job_repository.get, result.id) or result.job
+        body: dict[str, Any] = {"folder": str(batch), "files": saved, "job": job}
+        if job["status"] == "succeeded":
+            body.update(processed=True, summary=job.get("result"))
+            return ApiResponse(body, status_code=201)
+        body.update(processed=False, status_url=f"/api/v1/jobs/{job['id']}")
+        return ApiResponse(body, status_code=202)
 
     # --- Tipo de cambio --------------------------------------------------------------
 
@@ -572,7 +675,24 @@ def create_app(context: AppContext | None = None) -> FastAPI:
 
     @app.post("/api/v1/runs", tags=["bot"], status_code=202)
     def start_run(principal: Writer) -> dict[str, Any]:
-        """Lanza un ciclo en segundo plano (el candado de SQL Server evita dos a la vez)."""
+        """Lanza un ciclo en segundo plano (el candado de SQL Server evita dos a la vez).
+
+        Con la cola Redis el ciclo es un trabajo `bot.cycle` que ejecuta un worker.
+        """
+        if ctx.jobs.backend != "inline":
+            result = ctx.jobs.enqueue(
+                "bot.cycle",
+                {"trigger": "api"},
+                dedupe_key="api:bot.cycle",
+                created_by=principal.signature,
+            )
+            if not result.created:
+                raise HTTPException(409, f"Ya hay un ciclo en cola (trabajo #{result.id})")
+            return {
+                "status": "queued",
+                "job_id": result.id,
+                "status_url": f"/api/v1/jobs/{result.id}",
+            }
         current: threading.Thread | None = app.state.run_thread
         if current is not None and current.is_alive():
             raise HTTPException(409, "Ya hay un ciclo en curso lanzado desde la API")
@@ -592,5 +712,109 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         thread.start()
         ctx.logger.info("ciclo lanzado desde la API", extra={"by": principal.signature})
         return {"status": "started"}
+
+    # --- Trabajos en cola ------------------------------------------------------------
+
+    @app.get("/api/v1/tasks", tags=["trabajos"])
+    def list_tasks(_: Auth) -> dict[str, Any]:
+        from invoicebot.application.tasks import registry
+
+        return {
+            "backend": ctx.jobs.backend,
+            "items": [
+                {"name": s.name, "queue": s.queue, "description": s.description}
+                for s in sorted(registry.tasks.values(), key=lambda s: s.name)
+            ],
+        }
+
+    @app.get("/api/v1/jobs", tags=["trabajos"])
+    def list_jobs(
+        _: Auth,
+        status: str | None = None,
+        task: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        items = ctx.job_repository.list_jobs(status=status, task=task, limit=limit, offset=offset)
+        return {"items": items, "limit": limit, "offset": offset}
+
+    @app.post("/api/v1/jobs", tags=["trabajos"], status_code=202)
+    def create_job(
+        body: JobBody,
+        principal: Writer,
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ) -> dict[str, Any]:
+        """Encola una tarea (`GET /api/v1/tasks`) con sus parámetros."""
+        result = ctx.jobs.enqueue(
+            body.task,
+            body.payload,
+            idempotency_key=_idempotency(principal, idempotency_key),
+            created_by=principal.signature,
+        )
+        return {"created": result.created, "job": ctx.job_repository.get(result.id) or result.job}
+
+    def _job_or_404(job_id: int) -> dict[str, Any]:
+        job = ctx.job_repository.get(job_id)
+        if job is None:
+            raise HTTPException(404, "No existe el trabajo")
+        return job
+
+    @app.get("/api/v1/jobs/{job_id}", tags=["trabajos"])
+    def job_detail(job_id: int, _: Auth) -> dict[str, Any]:
+        job = _job_or_404(job_id)
+        job["children"] = ctx.job_repository.children(job_id)
+        return job
+
+    @app.get("/api/v1/jobs/{job_id}/events", tags=["trabajos"])
+    async def job_events(job_id: int, _: Auth, request: Request) -> Response:
+        """Progreso en vivo (Server-Sent Events) hasta que el trabajo termina."""
+        from starlette.concurrency import run_in_threadpool
+
+        _job_or_404(job_id)
+
+        async def stream() -> AsyncIterator[bytes]:
+            last: str | None = None
+            for _ in range(600):  # hasta 10 minutos; el cliente puede reconectar
+                if await request.is_disconnected():
+                    return
+                job = await run_in_threadpool(ctx.job_repository.get, job_id)
+                if job is None:
+                    return
+                job["children"] = await run_in_threadpool(ctx.job_repository.children, job_id)
+                data = json.dumps(job, ensure_ascii=False, default=_default)
+                if data != last:
+                    last = data
+                    yield f"event: job\ndata: {data}\n\n".encode()
+                if job["status"] in _FINAL_JOB_STATUSES and not any(
+                    job["children"].get(s) for s in ("queued", "running", "retrying")
+                ):
+                    yield b"event: end\ndata: {}\n\n"
+                    return
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/api/v1/jobs/{job_id}/retry", tags=["trabajos"])
+    def retry_job(job_id: int, _: Writer) -> dict[str, Any]:
+        job = ctx.job_repository.requeue(job_id, extra_attempts=1)
+        if job is None:
+            raise HTTPException(409, "Solo se reintenta un trabajo fallido o cancelado")
+        ctx.jobs.publish(job)
+        return ctx.job_repository.get(job_id) or job
+
+    @app.post("/api/v1/jobs/{job_id}/cancel", tags=["trabajos"])
+    def cancel_job(job_id: int, _: Writer) -> dict[str, Any]:
+        _job_or_404(job_id)
+        if not ctx.job_repository.cancel(job_id):
+            raise HTTPException(409, "El trabajo ya empezó o terminó")
+        return {"id": job_id, "status": "cancelled"}
+
+    @app.get("/api/v1/schedules", tags=["trabajos"])
+    def list_schedules(_: Auth) -> dict[str, Any]:
+        return {"items": ctx.job_repository.list_schedules()}
 
     return app

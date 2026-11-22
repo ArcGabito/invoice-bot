@@ -86,6 +86,8 @@ class ScanSummary:
     failures: list[dict[str, str]] = field(default_factory=list)
     retry_skipped: list[dict[str, str]] = field(default_factory=list)
     invoice_ids: list[int] = field(default_factory=list)
+    #: Documentos enviados a la cola (`documents.process`) en lugar de procesarse aquí.
+    dispatched: int = 0
     duration_ms: int = 0
 
     def add(self, result: ProcessResult, file_path: str) -> None:
@@ -122,6 +124,8 @@ class ScanSummary:
 
 
 Progress = Callable[[int, int, str, ProcessResult], None]
+#: Recibe un documento registrado y lo encola para que lo procese un worker.
+Dispatch = Callable[[dict[str, Any]], None]
 
 
 def _ocr_issues(
@@ -440,8 +444,13 @@ def _run_queue(
     items: Sequence[tuple[dict[str, Any], str, str]],
     summary: ScanSummary,
     on_progress: Progress | None,
+    dispatch: Dispatch | None = None,
 ) -> None:
-    """XML primero (para vincular sus PDF), luego el resto, con concurrencia limitada."""
+    """XML primero (para vincular sus PDF), luego el resto, con concurrencia limitada.
+
+    Con ``dispatch`` (modo colas) los XML se leen aquí, porque son rápidos y sin IA, y
+    así sus PDF se vinculan; el resto se encola para que lo procesen los workers.
+    """
     lock = Lock()
     done = 0
 
@@ -469,6 +478,17 @@ def _run_queue(
     xml = [i for i in items if i[2] == XML_MIME_TYPE]
     others = [i for i in items if i[2] != XML_MIME_TYPE]
     workers = max(1, deps.config.concurrency)
+    if dispatch is not None:
+        for item in xml:
+            work(item)
+        for document, file_path, _mime in others:
+            sibling = _extracted_xml_sibling(deps, file_path)
+            if sibling is not None:
+                summary.add(_link_to_xml(deps, document, sibling), file_path)
+            else:
+                dispatch(document)
+                summary.dispatched += 1
+        return
     for group in (xml, others):
         if not group:
             continue
@@ -514,6 +534,7 @@ def scan_invoices(
     dry_run: bool = False,
     on_discovered: Callable[[ScanSummary], None] | None = None,
     on_progress: Progress | None = None,
+    dispatch: Dispatch | None = None,
 ) -> ScanSummary:
     """Procesa los comprobantes de una carpeta (o un archivo). Es idempotente.
 
@@ -528,7 +549,8 @@ def scan_invoices(
     discovery = discover_files(root, recursive=recursive)
     summary.found = len(discovery.supported)
     summary.unsupported = discovery.unsupported
-    if not dry_run:
+    # Con colas, un documento "en proceso" puede estar en manos de otro worker: no se toca.
+    if not dry_run and dispatch is None:
         reset = repo.reset_interrupted()
         if reset:
             deps.logger.info("documentos interrumpidos devueltos a pendiente: %s", reset)
@@ -584,7 +606,7 @@ def scan_invoices(
     if on_discovered:
         on_discovered(summary)
     if not dry_run:
-        _run_queue(deps, queue, summary, on_progress)
+        _run_queue(deps, queue, summary, on_progress, dispatch)
     summary.duration_ms = int((time.monotonic() - started) * 1000)
     return summary
 
@@ -614,12 +636,14 @@ def retry_documents(
     pending: bool = True,
     force: bool = False,
     on_progress: Progress | None = None,
+    dispatch: Dispatch | None = None,
 ) -> ScanSummary:
     """Reintenta documentos fallidos y recupera los de una ejecución interrumpida."""
     started = time.monotonic()
     repo = deps.repository
     summary = ScanSummary()
-    repo.reset_interrupted()
+    if dispatch is None:
+        repo.reset_interrupted()
     statuses = [
         s for s, on in ((DocumentStatus.FAILED, failed), (DocumentStatus.PENDING, pending)) if on
     ]
@@ -654,6 +678,31 @@ def retry_documents(
         queue.append((document, path, document["mime_type"]))
     summary.found = len(candidates)
     summary.queued = len(queue)
-    _run_queue(deps, queue, summary, on_progress)
+    _run_queue(deps, queue, summary, on_progress, dispatch)
     summary.duration_ms = int((time.monotonic() - started) * 1000)
     return summary
+
+
+def process_document_by_id(deps: Deps, document_id: int) -> ProcessResult:
+    """Procesa un documento ya registrado (lo usa el worker de la cola `extract`).
+
+    Es idempotente: si otro intento ya lo terminó, no hace nada.
+    """
+    document = deps.repository.get_document(document_id)
+    if document is None:
+        return ProcessResult(
+            "failed", error=f"No existe el documento {document_id}", kind="missing"
+        )
+    if document["status"] in (DocumentStatus.EXTRACTED, DocumentStatus.SKIPPED):
+        return ProcessResult("skipped", reason="already_processed")
+    path, kind, message = _locate_file(deps, document)
+    if path is None:
+        deps.repository.update_document(
+            document_id, status=DocumentStatus.FAILED, error_kind=kind, error_message=message
+        )
+        return ProcessResult("failed", error=message, kind=kind)
+    if document["mime_type"] != XML_MIME_TYPE:
+        sibling = _extracted_xml_sibling(deps, path)
+        if sibling is not None:
+            return _link_to_xml(deps, document, sibling)
+    return process_document(deps, document=document, file_path=path)

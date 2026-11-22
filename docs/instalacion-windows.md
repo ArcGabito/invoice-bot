@@ -2,9 +2,11 @@
 
 Escenario típico de una empresa: SQL Server en la red con **seguridad integrada de Windows**, una carpeta compartida o de OneDrive/SharePoint como entrada y el equipo de contabilidad revisando desde el navegador.
 
+En Windows lo habitual es la cola `inline` (sin Redis): `invoicebot run` en una tarea programada hace todo el ciclo. Si el volumen crece, apunta `INVOICEBOT_REDIS_URL` a un Redis de la red y ejecuta `invoicebot worker` y `invoicebot scheduler` como servicios (por ejemplo con NSSM o una tarea "al iniciar").
+
 ## 1. Requisitos
 
-- Python 3.12 o posterior (`winget install Python.Python.3.13`).
+- [uv](https://docs.astral.sh/uv/) (`winget install astral-sh.uv`): instala Python 3.13 y las dependencias exactas de `uv.lock`. Con Python ya instalado también sirve `py -m venv .venv` y `.venv\Scripts\pip install -e .`.
 - [ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server).
 - Para OCR de escaneos y fotos: [Tesseract de UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) con el idioma español (o `INVOICEBOT_OCR_ENGINE=claude`).
 
@@ -13,8 +15,7 @@ Escenario típico de una empresa: SQL Server en la red con **seguridad integrada
 ```powershell
 git clone https://github.com/ArcGabito/invoice-bot.git C:\InvoiceBot
 cd C:\InvoiceBot
-py -m venv .venv
-.venv\Scripts\pip install -e .
+uv sync --locked --no-dev      # crea .venv con Python 3.13 y las dependencias de uv.lock
 copy .env.example .env
 ```
 

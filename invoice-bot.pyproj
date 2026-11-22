@@ -2,7 +2,7 @@
 <!--
   Proyecto de Python para Visual Studio 2022/2026 (carga de trabajo "Desarrollo de Python").
   F5 inicia la API (invoicebot serve) con el entorno .venv; el Explorador de pruebas usa pytest.
-  Crear el entorno: py -m venv .venv  y  .venv\Scripts\pip install -e ".[dev]"
+  Crear el entorno: uv sync  (crea .venv con Python 3.13 y las dependencias de uv.lock, con el grupo dev)
 -->
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
   <PropertyGroup>
@@ -42,6 +42,9 @@
     <Content Include="src\invoicebot\api\templates\*.html" />
     <Content Include="src\invoicebot\api\static\*.*" />
     <Content Include="pyproject.toml" />
+    <Content Include="uv.lock" />
+    <Content Include=".python-version" />
+    <Content Include="ROADMAP.md" />
     <Content Include=".env.example" />
     <Content Include="Dockerfile" />
     <Content Include="docker-compose.yml" />

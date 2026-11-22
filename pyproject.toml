@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
   "anthropic>=2.12",
   "defusedxml>=0.7",
+  "dramatiq[redis]>=2.2",
   "fastapi>=0.165",
   "httpx>=0.28",
   "jinja2>=3.1",
@@ -33,13 +34,14 @@ dependencies = [
   "pytesseract>=0.3.13",
   "python-dotenv>=1.1",
   "python-multipart>=0.0.20",
+  "redis>=6.0",
   "sqlalchemy>=2.0.40",
   "typer>=0.16",
   "tzdata>=2025.2",
   "uvicorn[standard]>=0.35",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
   "mypy>=1.18",
   "pytest>=8.4",
@@ -61,6 +63,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
   "db: necesita un SQL Server real (INVOICEBOT_TEST_DB_* o .env.test)",
+  "redis: necesita un Redis real (INVOICEBOT_TEST_REDIS_URL)",
   "ocr: necesita Tesseract instalado",
 ]
 filterwarnings = ["ignore::DeprecationWarning:pytesseract"]

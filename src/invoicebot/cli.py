@@ -38,6 +38,14 @@ fx_app = typer.Typer(help="Tipo de cambio: set · fetch · import · list", no_a
 mail_app = typer.Typer(help="Correo: check · fetch · list · login", no_args_is_help=True)
 user_app = typer.Typer(help="Usuarios de la pantalla de revisión", no_args_is_help=True)
 key_app = typer.Typer(help="Claves de API para integrar otros sistemas", no_args_is_help=True)
+jobs_app = typer.Typer(
+    help="Trabajos en cola: list · show · retry · cancel · run", no_args_is_help=True
+)
+schedule_app = typer.Typer(
+    help="Tareas programadas: list · tick · set · enable · disable", no_args_is_help=True
+)
+app.add_typer(jobs_app, name="jobs")
+app.add_typer(schedule_app, name="schedule")
 app.add_typer(db_app, name="db")
 app.add_typer(fx_app, name="fx")
 app.add_typer(mail_app, name="mail")
@@ -1173,6 +1181,7 @@ def doctor() -> None:
 
         check("Python", lambda: sys.version.split()[0])
         check("SQL Server", ctx.db.ping)
+        check(f"Cola ({ctx.config.queue.backend})", ctx.queue.ping)
 
         def schema() -> str:
             from invoicebot.infrastructure.db.migration import schema_status
@@ -1252,6 +1261,15 @@ def show_config() -> None:
             f"API:                 {c.serve.host}:{c.serve.port} · docs {'sí' if c.serve.api_docs else 'no'}"
         )
         out.line(f"Zona horaria:        {c.timezone} (hoy {c.today()})")
+        out.line(
+            f"Cola:                {c.queue.backend}"
+            + (
+                f" · Redis {'definido' if c.queue.redis_url_set else 'no definido'}"
+                if c.queue.backend == "redis"
+                else ""
+            )
+            + f" · espacio {c.queue.namespace}"
+        )
         out.data(
             {
                 "ai_provider": c.ai_provider,
@@ -1267,11 +1285,355 @@ def show_config() -> None:
                 "inbox_dir": c.run.inbox_dir,
                 "export_dir": c.export_dir,
                 "timezone": c.timezone,
+                "queue": {"backend": c.queue.backend, "namespace": c.queue.namespace},
             }
         )
         return ExitCode.OK
 
     _run(command)
+
+
+# --- Trabajos en cola, worker y programador --------------------------------------------
+
+
+def _wait_for_schema(ctx: AppContext, out: Out, timeout_s: float = 300) -> None:
+    """Los workers no migran: esperan a que `db migrate` (o la API) deje el esquema listo."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            ctx.ensure_schema(migrate=False)
+            return
+        except Exception as error:
+            if time.monotonic() >= deadline:
+                raise
+            typer.echo(f"Esperando a la base de datos: {error_message(error)}", err=True)
+            time.sleep(10)
+
+
+def _parse_payload(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError as error:
+        raise ConfigError(f"--payload no es JSON válido: {error}") from error
+    if not isinstance(value, dict):
+        raise ConfigError('--payload debe ser un objeto JSON, p. ej. {"month": "2026-10"}')
+    return value
+
+
+def _job_line(job: dict[str, Any]) -> str:
+    created = job.get("created_at")
+    stamp = created.strftime("%Y-%m-%d %H:%M") if isinstance(created, datetime) else ""
+    error = f" · {str(job['error_message'])[:80]}" if job.get("error_message") else ""
+    return (
+        f"#{job['id']:<7} {job['status']:<10} {job['task']:<20} "
+        f"intento {job['attempts']}/{job['max_attempts']}  {stamp}{error}"
+    )
+
+
+@app.command()
+def worker(
+    queues: Annotated[
+        str | None,
+        typer.Option(
+            help="Colas separadas por comas (por defecto todas: ingest,extract,sunat,default)"
+        ),
+    ] = None,
+    threads: Annotated[
+        int | None, typer.Option(min=1, max=64, help="Por defecto INVOICEBOT_WORKER_THREADS")
+    ] = None,
+) -> None:
+    """Atiende la cola de Redis (Dramatiq). Escala con varias réplicas."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.jobs import QUEUES
+        from invoicebot.application.tasks import registry
+        from invoicebot.infrastructure.queue.redis_queue import RedisQueue, run_worker
+
+        if ctx.config.queue.backend != "redis":
+            raise ConfigError(
+                "El worker necesita INVOICEBOT_QUEUE_BACKEND=redis e INVOICEBOT_REDIS_URL "
+                "(sin Redis usa `invoicebot run --watch`)"
+            )
+        selected = [
+            q.strip() for q in (queues or ",".join(registry.queues())).split(",") if q.strip()
+        ]
+        unknown = [q for q in selected if q not in QUEUES]
+        if unknown:
+            raise ConfigError(f"Colas desconocidas: {', '.join(unknown)} (usa {', '.join(QUEUES)})")
+        _wait_for_schema(ctx, out)
+        # Se crean ahora, en el hilo principal: los hilos del worker los comparten.
+        jobs = ctx.jobs
+        if "extract" in selected:
+            _ = ctx.worker_deps
+        queue = ctx.queue
+        assert isinstance(queue, RedisQueue)
+        typer.echo(
+            f"InvoiceBot {__version__}: worker de {', '.join(selected)} ({queue.ping()})", err=True
+        )
+        run_worker(
+            queue,
+            queues=selected,
+            threads=threads or ctx.config.queue.worker_threads,
+            logger=jobs.logger,
+        )
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def scheduler(
+    interval: Annotated[int, typer.Option(min=5, max=3600, help="Segundos entre ticks")] = 30,
+) -> None:
+    """Encola las tareas programadas (INVOICEBOT_SCHEDULE_*) y reenvía lo pendiente."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.scheduler import run_scheduler
+
+        _wait_for_schema(ctx, out)
+        typer.echo(f"InvoiceBot {__version__}: programador ({ctx.queue.ping()})", err=True)
+        run_scheduler(ctx, interval_s=interval)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def enqueue(
+    task: Annotated[str, typer.Argument(help="Nombre de la tarea (ver `invoicebot tasks`)")],
+    payload: Annotated[str | None, typer.Option(help="Parámetros en JSON")] = None,
+    wait: Annotated[bool, typer.Option("--wait", help="Espera a que termine")] = False,
+    timeout: Annotated[int, typer.Option(help="Segundos máximos con --wait")] = 3600,
+) -> None:
+    """Encola una tarea (con la cola inline se ejecuta al momento)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        result = ctx.jobs.enqueue(task, _parse_payload(payload), created_by=f"cli:{ctx.reviewer}")
+        job = ctx.job_repository.get(result.id) or result.job
+        if wait:
+            deadline = time.monotonic() + timeout
+            while job["status"] in ("queued", "running", "retrying"):
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(2)
+                job = ctx.job_repository.get(result.id) or job
+        out.line(("Encolado: " if result.created else "Ya estaba encolado: ") + _job_line(job))
+        if job.get("result") is not None and not out.json_mode:
+            out.line(json.dumps(job["result"], ensure_ascii=False, indent=2, default=_default))
+        out.data(job)
+        return ExitCode.GENERAL_ERROR if job["status"] == "failed" else ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def tasks() -> None:
+    """Tareas que pueden encolarse o programarse."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tasks import registry
+
+        items = [
+            {"name": s.name, "queue": s.queue, "description": s.description}
+            for s in sorted(registry.tasks.values(), key=lambda s: s.name)
+        ]
+        for item in items:
+            out.line(f"{item['name']:<20} {item['queue']:<8} {item['description']}")
+        out.data(items)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@jobs_app.command("list")
+def jobs_list(
+    status: Annotated[
+        str | None, typer.Option(help="queued, running, retrying, succeeded, failed, cancelled")
+    ] = None,
+    task: Annotated[str | None, typer.Option()] = None,
+    limit: Annotated[int, typer.Option(min=1, max=500)] = 30,
+) -> None:
+    """Últimos trabajos."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        rows = ctx.job_repository.list_jobs(status=status, task=task, limit=limit)
+        for row in rows:
+            out.line(_job_line(row))
+        if not rows:
+            out.line("Sin trabajos.")
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@jobs_app.command("show")
+def jobs_show(job_id: int) -> None:
+    """Detalle de un trabajo (parámetros, resultado y error)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        job = ctx.job_repository.get(job_id)
+        if job is None:
+            raise ConfigError(f"No existe el trabajo #{job_id}")
+        job["children"] = ctx.job_repository.children(job_id)
+        out.line(_job_line(job))
+        if not out.json_mode:
+            out.line(json.dumps(job, ensure_ascii=False, indent=2, default=_default))
+        out.data(job)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@jobs_app.command("retry")
+def jobs_retry(
+    job_id: int, attempts: Annotated[int, typer.Option(min=1, max=20, help="Intentos extra")] = 1
+) -> None:
+    """Vuelve a encolar un trabajo fallido o cancelado."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        job = ctx.job_repository.requeue(job_id, extra_attempts=attempts)
+        if job is None:
+            raise ConfigError(f"El trabajo #{job_id} no existe o no está fallido ni cancelado")
+        ctx.jobs.publish(job)
+        job = ctx.job_repository.get(job_id) or job
+        out.line("Reencolado: " + _job_line(job))
+        out.data(job)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@jobs_app.command("cancel")
+def jobs_cancel(job_id: int) -> None:
+    """Cancela un trabajo que todavía no empezó (o que espera un reintento)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        if not ctx.job_repository.cancel(job_id):
+            raise ConfigError(f"El trabajo #{job_id} no existe o ya empezó")
+        out.line(f"Trabajo #{job_id} cancelado.")
+        out.data({"id": job_id, "status": "cancelled"})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@jobs_app.command("run")
+def jobs_run(job_id: int) -> None:
+    """Ejecuta un trabajo en este proceso (diagnóstico)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        job = ctx.jobs.run_now(job_id)
+        if job is None:
+            raise ConfigError(f"No existe el trabajo #{job_id}")
+        out.line(_job_line(job))
+        out.data(job)
+        return ExitCode.GENERAL_ERROR if job["status"] == "failed" else ExitCode.OK
+
+    _run(command)
+
+
+@schedule_app.command("list")
+def schedule_list() -> None:
+    """Programaciones con su próxima ejecución."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.scheduler import configured_schedules
+
+        ctx.job_repository.sync_schedules(configured_schedules(ctx.config))
+        rows = ctx.job_repository.list_schedules()
+        for row in rows:
+            state = "activa" if row["enabled"] else "inactiva"
+            nxt = row["next_run_at"]
+            when = nxt.astimezone().strftime("%Y-%m-%d %H:%M") if isinstance(nxt, datetime) else "—"
+            out.line(
+                f"{row['name']:<10} {row['cron']:<18} {row['task']:<18} {state:<9} próxima {when} ({row['source']})"
+            )
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@schedule_app.command("tick")
+def schedule_tick() -> None:
+    """Un solo tick del programador (Container Apps Job o tarea programada)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.scheduler import tick
+
+        _wait_for_schema(ctx, out, timeout_s=120)
+        result = tick(ctx)
+        if result.skipped:
+            out.line(f"Omitido: {result.skipped}")
+        for item in result.enqueued:
+            out.line(
+                f"Encolado {item['schedule']} → trabajo #{item['job_id']}"
+                + ("" if item["new"] else " (ya activo)")
+            )
+        if result.relayed:
+            out.line(f"Reenviados: {result.relayed}")
+        for error in result.errors:
+            typer.echo(f"Error: {error}", err=True)
+        out.data(result.as_dict())
+        return ExitCode.PARTIAL if result.errors else ExitCode.OK
+
+    _run(command)
+
+
+@schedule_app.command("set")
+def schedule_set(
+    name: str,
+    cron: Annotated[str, typer.Argument(help='Cron de 5 campos, p. ej. "0 7 * * 1-5"')],
+    task: str,
+    payload: Annotated[str | None, typer.Option(help="Parámetros en JSON")] = None,
+) -> None:
+    """Crea o cambia una programación manual (no la sobrescribe la configuración)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tasks import registry
+        from invoicebot.domain.cron import CronError, parse_cron
+
+        registry.get(task)
+        try:
+            parse_cron(cron)
+        except CronError as error:
+            raise ConfigError(f"Cron no válido: {error}") from error
+        ctx.job_repository.upsert_manual_schedule(
+            name=name, task=task, cron=cron, payload=_parse_payload(payload)
+        )
+        out.line(f"Programación {name}: {cron} → {task}")
+        out.data({"name": name, "cron": cron, "task": task})
+        return ExitCode.OK
+
+    _run(command)
+
+
+def _set_schedule_enabled(name: str, enabled: bool) -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        if not ctx.job_repository.set_schedule_enabled(name, enabled):
+            raise ConfigError(f"No existe la programación {name!r}")
+        out.line(
+            f"Programación {name} {'activada' if enabled else 'desactivada'} (ahora es manual)"
+        )
+        out.data({"name": name, "enabled": enabled})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@schedule_app.command("enable")
+def schedule_enable(name: str) -> None:
+    """Activa una programación."""
+    _set_schedule_enabled(name, True)
+
+
+@schedule_app.command("disable")
+def schedule_disable(name: str) -> None:
+    """Desactiva una programación."""
+    _set_schedule_enabled(name, False)
 
 
 def main() -> None:
