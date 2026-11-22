@@ -1,4 +1,4 @@
-"""Trabajos en cola (`jobs`) y tareas programadas (`schedules`) en SQL Server.
+"""Trabajos en cola (`jobs`) y tareas programadas (`schedules`) con SQLAlchemy ORM.
 
 SQL Server es la fuente de verdad de cada trabajo: Redis solo lleva su id. Así, si
 Redis se reinicia o un mensaje se pierde, el programador vuelve a publicar los
@@ -8,20 +8,39 @@ trabajos que quedaron sin enviar (`published_at` NULL).
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager, suppress
+from collections.abc import Sequence
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Connection, bindparam, text
+from sqlalchemy import Executable, delete, func, insert, literal_column, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from invoicebot.infrastructure.db.connection import Database
 from invoicebot.infrastructure.db.invoice_repository import Row, as_row
+from invoicebot.infrastructure.db.models import Job, Schedule
 
 #: Estados en los que el trabajo todavía puede ejecutarse.
 ACTIVE_STATUSES = ("queued", "running", "retrying")
 FINAL_STATUSES = ("succeeded", "failed", "cancelled")
+_NOW = func.sysutcdatetime()
+
+_LIST_COLUMNS = (
+    Job.id,
+    Job.task,
+    Job.queue,
+    Job.status,
+    Job.attempts,
+    Job.max_attempts,
+    Job.error_message,
+    Job.parent_id,
+    Job.worker,
+    Job.created_by,
+    Job.created_at,
+    Job.started_at,
+    Job.finished_at,
+    Job.run_after,
+)
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -51,28 +70,18 @@ class JobRepository:
     def __init__(self, db: Database):
         self.db = db
 
-    @contextmanager
-    def _c(self) -> Iterator[Connection]:
+    def _one(self, statement: Executable) -> Row | None:
         with self.db.begin() as conn:
-            yield conn
+            row = conn.execute(statement).mappings().first()
+            return _decode(as_row(row)) if row is not None else None
 
-    def _one(self, sql: str, params: dict[str, Any] | None = None) -> Row | None:
-        with self._c() as conn:
-            row = conn.execute(text(sql), params or {}).first()
-            return _decode(as_row(row._mapping)) if row is not None else None
+    def _all(self, statement: Executable) -> list[Row]:
+        with self.db.begin() as conn:
+            return [_decode(as_row(r)) or {} for r in conn.execute(statement).mappings()]
 
-    def _all(self, sql: str, params: dict[str, Any] | None = None, **bind: Any) -> list[Row]:
-        statement = text(sql)
-        for name in bind.get("expanding", ()):
-            statement = statement.bindparams(bindparam(name, expanding=True))
-        with self._c() as conn:
-            return [
-                _decode(as_row(r._mapping)) or {} for r in conn.execute(statement, params or {})
-            ]
-
-    def _exec(self, sql: str, params: dict[str, Any] | None = None) -> int:
-        with self._c() as conn:
-            return int(conn.execute(text(sql), params or {}).rowcount or 0)
+    def _exec(self, statement: Executable) -> int:
+        with self.db.begin() as conn:
+            return int(conn.execute(statement).rowcount or 0)
 
     # --- Trabajos -------------------------------------------------------------
 
@@ -95,25 +104,23 @@ class JobRepository:
             return existing, False
         try:
             row = self._one(
-                """INSERT INTO jobs (task, queue, status, payload, max_attempts, dedupe_key,
-                     idempotency_key, parent_id, created_by, run_after)
-                   OUTPUT inserted.*
-                   VALUES (:task, :queue, N'queued', :payload, :max, :dedupe, :idem, :parent,
-                     :by, :after)""",
-                {
-                    "task": task,
-                    "queue": queue,
-                    "payload": _json(payload or {}),
-                    "max": max_attempts,
-                    "dedupe": dedupe_key,
-                    "idem": idempotency_key,
-                    "parent": parent_id,
-                    "by": (created_by or "")[:150] or None,
-                    "after": _utc(run_after),
-                },
+                insert(Job)
+                .values(
+                    task=task,
+                    queue=queue,
+                    status="queued",
+                    payload=_json(payload or {}),
+                    max_attempts=max_attempts,
+                    dedupe_key=dedupe_key,
+                    idempotency_key=idempotency_key,
+                    parent_id=parent_id,
+                    created_by=(created_by or "")[:150] or None,
+                    run_after=_utc(run_after),
+                )
+                .returning(Job)
             )
         except IntegrityError:
-            # Otro proceso lo creó a la vez: gana el suyo.
+            # Otro proceso lo creó a la vez (índice único filtrado): gana el suyo.
             existing = self._existing(dedupe_key, idempotency_key)
             if existing is None:
                 raise
@@ -123,18 +130,18 @@ class JobRepository:
 
     def _existing(self, dedupe_key: str | None, idempotency_key: str | None) -> Row | None:
         if idempotency_key:
-            row = self._one("SELECT * FROM jobs WHERE idempotency_key = :k", {"k": idempotency_key})
+            row = self.get_by_idempotency_key(idempotency_key)
             if row is not None:
                 return row
         if dedupe_key:
-            return self._one("SELECT * FROM jobs WHERE dedupe_key = :k", {"k": dedupe_key})
+            return self._one(select(Job).where(Job.dedupe_key == dedupe_key))
         return None
 
     def get_by_idempotency_key(self, key: str) -> Row | None:
-        return self._one("SELECT * FROM jobs WHERE idempotency_key = :k", {"k": key})
+        return self._one(select(Job).where(Job.idempotency_key == key))
 
     def get(self, job_id: int) -> Row | None:
-        return self._one("SELECT * FROM jobs WHERE id = :id", {"id": job_id})
+        return self._one(select(Job).where(Job.id == job_id))
 
     def mark_published(self, job_id: int, *, attempts: int) -> None:
         """Anota el envío solo si el trabajo sigue como se envió (mismo número de intentos).
@@ -144,10 +151,14 @@ class JobRepository:
         programador lo reenvíe.
         """
         self._exec(
-            """UPDATE jobs SET published_at = SYSUTCDATETIME()
-               WHERE id = :id AND published_at IS NULL AND attempts = :a
-                 AND status IN (N'queued', N'retrying')""",
-            {"id": job_id, "a": attempts},
+            update(Job)
+            .where(
+                Job.id == job_id,
+                Job.published_at.is_(None),
+                Job.attempts == attempts,
+                Job.status.in_(("queued", "retrying")),
+            )
+            .values(published_at=_NOW)
         )
 
     def claim(self, job_id: int, worker: str) -> Row | None:
@@ -156,54 +167,69 @@ class JobRepository:
         Acepta un trabajo "running": la cola solo lo reentrega si el worker anterior murió.
         """
         return self._one(
-            """UPDATE jobs SET status = N'running', attempts = attempts + 1, worker = :w,
-                 started_at = SYSUTCDATETIME(), updated_at = SYSUTCDATETIME()
-               OUTPUT inserted.*
-               WHERE id = :id AND status IN (N'queued', N'retrying', N'running')""",
-            {"id": job_id, "w": worker[:200]},
+            update(Job)
+            .where(Job.id == job_id, Job.status.in_(ACTIVE_STATUSES))
+            .values(
+                status="running",
+                attempts=Job.attempts + 1,
+                worker=worker[:200],
+                started_at=_NOW,
+                updated_at=_NOW,
+            )
+            .returning(Job)
         )
 
     def succeed(self, job_id: int, result: Any) -> None:
         self._exec(
-            """UPDATE jobs SET status = N'succeeded', result = :r, error_message = NULL,
-                 dedupe_key = NULL, finished_at = SYSUTCDATETIME(), updated_at = SYSUTCDATETIME()
-               WHERE id = :id""",
-            {"id": job_id, "r": _json(result)},
+            update(Job)
+            .where(Job.id == job_id)
+            .values(
+                status="succeeded",
+                result=_json(result),
+                error_message=None,
+                dedupe_key=None,
+                finished_at=_NOW,
+                updated_at=_NOW,
+            )
         )
 
     def fail(self, job_id: int, error: str, *, retry_at: datetime | None) -> None:
         """Con ``retry_at`` queda "retrying" y sin publicar; sin él, falla definitivamente."""
         if retry_at is None:
-            self._exec(
-                """UPDATE jobs SET status = N'failed', error_message = :e, dedupe_key = NULL,
-                     finished_at = SYSUTCDATETIME(), updated_at = SYSUTCDATETIME()
-                   WHERE id = :id""",
-                {"id": job_id, "e": error[:4000]},
-            )
+            values: dict[str, Any] = {
+                "status": "failed",
+                "dedupe_key": None,
+                "finished_at": _NOW,
+            }
         else:
-            self._exec(
-                """UPDATE jobs SET status = N'retrying', error_message = :e, run_after = :at,
-                     published_at = NULL, updated_at = SYSUTCDATETIME()
-                   WHERE id = :id""",
-                {"id": job_id, "e": error[:4000], "at": _utc(retry_at)},
-            )
+            values = {"status": "retrying", "run_after": _utc(retry_at), "published_at": None}
+        self._exec(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(error_message=error[:4000], updated_at=_NOW, **values)
+        )
 
     def defer(self, job_id: int, run_after: datetime, reason: str) -> None:
         """Lo deja para más tarde sin gastar un intento (p. ej. límite de llamadas)."""
         self._exec(
-            """UPDATE jobs SET status = N'retrying', attempts = attempts - 1, run_after = :at,
-                 error_message = :e, published_at = NULL, updated_at = SYSUTCDATETIME()
-               WHERE id = :id""",
-            {"id": job_id, "at": _utc(run_after), "e": reason[:4000]},
+            update(Job)
+            .where(Job.id == job_id)
+            .values(
+                status="retrying",
+                attempts=Job.attempts - 1,
+                run_after=_utc(run_after),
+                error_message=reason[:4000],
+                published_at=None,
+                updated_at=_NOW,
+            )
         )
 
     def cancel(self, job_id: int) -> bool:
         return (
             self._exec(
-                """UPDATE jobs SET status = N'cancelled', dedupe_key = NULL,
-                     finished_at = SYSUTCDATETIME(), updated_at = SYSUTCDATETIME()
-                   WHERE id = :id AND status IN (N'queued', N'retrying')""",
-                {"id": job_id},
+                update(Job)
+                .where(Job.id == job_id, Job.status.in_(("queued", "retrying")))
+                .values(status="cancelled", dedupe_key=None, finished_at=_NOW, updated_at=_NOW)
             )
             > 0
         )
@@ -211,24 +237,38 @@ class JobRepository:
     def requeue(self, job_id: int, *, extra_attempts: int) -> Row | None:
         """Vuelve a encolar un trabajo fallido o cancelado (con más intentos si hace falta)."""
         return self._one(
-            """UPDATE jobs SET status = N'queued', published_at = NULL, run_after = NULL,
-                 finished_at = NULL, max_attempts = CASE WHEN attempts + :n > max_attempts
-                   THEN attempts + :n ELSE max_attempts END,
-                 updated_at = SYSUTCDATETIME()
-               OUTPUT inserted.*
-               WHERE id = :id AND status IN (N'failed', N'cancelled')""",
-            {"id": job_id, "n": extra_attempts},
+            update(Job)
+            .where(Job.id == job_id, Job.status.in_(("failed", "cancelled")))
+            .values(
+                status="queued",
+                published_at=None,
+                run_after=None,
+                finished_at=None,
+                max_attempts=func.iif(
+                    Job.attempts + extra_attempts > Job.max_attempts,
+                    Job.attempts + extra_attempts,
+                    Job.max_attempts,
+                ),
+                updated_at=_NOW,
+            )
+            .returning(Job)
         )
 
     def due_unpublished(self, *, now: datetime, grace_s: int, limit: int = 500) -> list[Row]:
         """Trabajos pendientes de enviar a la cola: nuevos que no se publicaron (tras un margen,
         por si su creador aún lo está haciendo) y reintentos cuya hora llegó."""
+        due_at = func.coalesce(
+            Job.run_after, func.dateadd(literal_column("SECOND"), grace_s, Job.created_at)
+        )
         return self._all(
-            """SELECT TOP (:n) * FROM jobs
-               WHERE status IN (N'queued', N'retrying') AND published_at IS NULL
-                 AND COALESCE(run_after, DATEADD(SECOND, :grace, created_at)) <= :now
-               ORDER BY id""",
-            {"n": limit, "grace": grace_s, "now": _utc(now)},
+            select(Job)
+            .where(
+                Job.status.in_(("queued", "retrying")),
+                Job.published_at.is_(None),
+                due_at <= _utc(now),
+            )
+            .order_by(Job.id)
+            .limit(limit)
         )
 
     def list_jobs(
@@ -239,45 +279,37 @@ class JobRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> list[Row]:
-        where: list[str] = []
-        params: dict[str, Any] = {"n": limit, "o": offset}
+        query = select(*_LIST_COLUMNS).order_by(Job.id.desc()).offset(offset).limit(limit)
         if status:
-            where.append("status = :s")
-            params["s"] = status
+            query = query.where(Job.status == status)
         if task:
-            where.append("task = :t")
-            params["t"] = task
-        clause = f"WHERE {' AND '.join(where)}" if where else ""
-        return self._all(
-            f"""SELECT id, task, queue, status, attempts, max_attempts, error_message, parent_id, worker,
-                  created_by, created_at, started_at, finished_at, run_after
-                FROM jobs {clause} ORDER BY id DESC
-                OFFSET :o ROWS FETCH NEXT :n ROWS ONLY""",
-            params,
-        )
+            query = query.where(Job.task == task)
+        return self._all(query)
 
     def children(self, parent_id: int) -> dict[str, int]:
         rows = self._all(
-            "SELECT status, COUNT(*) AS n FROM jobs WHERE parent_id = :p GROUP BY status",
-            {"p": parent_id},
+            select(Job.status, func.count().label("n"))
+            .where(Job.parent_id == parent_id)
+            .group_by(Job.status)
         )
         return {r["status"]: int(r["n"]) for r in rows}
 
     def counts(self) -> list[Row]:
         """Trabajos por tarea y estado (métricas). Los terminados, solo de las últimas 24 h."""
+        day_ago = func.dateadd(literal_column("HOUR"), -24, _NOW)
         return self._all(
-            """SELECT task, status, COUNT(*) AS n FROM jobs
-               WHERE status IN (N'queued', N'running', N'retrying')
-                  OR finished_at >= DATEADD(HOUR, -24, SYSUTCDATETIME())
-               GROUP BY task, status"""
+            select(Job.task, Job.status, func.count().label("n"))
+            .where(or_(Job.status.in_(ACTIVE_STATUSES), Job.finished_at >= day_ago))
+            .group_by(Job.task, Job.status)
         )
 
     def oldest_waiting_seconds(self) -> float | None:
+        ready_at = func.coalesce(Job.run_after, Job.created_at)
+        waited = func.datediff_big(literal_column("MILLISECOND"), func.min(ready_at), _NOW)
         row = self._one(
-            """SELECT DATEDIFF_BIG(MILLISECOND, MIN(COALESCE(run_after, created_at)),
-                 SYSUTCDATETIME()) AS ms
-               FROM jobs WHERE status IN (N'queued', N'retrying')
-                 AND COALESCE(run_after, created_at) <= SYSUTCDATETIME()"""
+            select(waited.label("ms")).where(
+                Job.status.in_(("queued", "retrying")), ready_at <= _NOW
+            )
         )
         if row is None or row["ms"] is None:
             return None
@@ -285,9 +317,10 @@ class JobRepository:
 
     def purge(self, *, older_than_days: int) -> int:
         return self._exec(
-            """DELETE FROM jobs WHERE status IN (N'succeeded', N'cancelled', N'failed')
-                 AND finished_at < DATEADD(DAY, -:d, SYSUTCDATETIME())""",
-            {"d": older_than_days},
+            delete(Job).where(
+                Job.status.in_(FINAL_STATUSES),
+                Job.finished_at < func.dateadd(literal_column("DAY"), -older_than_days, _NOW),
+            )
         )
 
     # --- Programación -----------------------------------------------------------
@@ -296,75 +329,93 @@ class JobRepository:
         """Alinea las programaciones `config` con la configuración actual.
 
         Una programación cuyo cron cambió se recalcula; las que ya no están configuradas
-        se desactivan (no se borran: conservan su historial).
+        se desactivan (no se borran: conservan su historial). Las manuales no se tocan.
         """
         names = [s["name"] for s in schedules]
-        with self._c() as conn:
-            for item in schedules:
-                conn.execute(
-                    text(
-                        """MERGE schedules AS t
-                           USING (SELECT :name AS name) AS s ON t.name = s.name
-                           WHEN MATCHED AND t.source = N'config' THEN UPDATE SET
-                             task = :task, payload = :payload, enabled = 1,
-                             next_run_at = CASE WHEN t.cron = :cron AND t.enabled = 1
-                               THEN t.next_run_at ELSE NULL END,
-                             cron = :cron, updated_at = SYSUTCDATETIME()
-                           WHEN NOT MATCHED THEN INSERT (name, task, cron, payload, source)
-                             VALUES (:name, :task, :cron, :payload, N'config');"""
-                    ),
-                    {
-                        "name": item["name"],
-                        "task": item["task"],
-                        "cron": item["cron"],
-                        "payload": _json(item.get("payload") or {}),
-                    },
+        with self.db.begin() as conn:
+            current = {
+                r.name: r
+                for r in conn.execute(
+                    select(Schedule.name, Schedule.cron, Schedule.enabled, Schedule.source)
                 )
-            statement = text(
-                """UPDATE schedules SET enabled = 0, updated_at = SYSUTCDATETIME()
-                   WHERE source = N'config' AND enabled = 1"""
-                + (" AND name NOT IN :names" if names else "")
+            }
+            for item in schedules:
+                payload = _json(item.get("payload") or {})
+                found = current.get(item["name"])
+                if found is None:
+                    # Otro proceso pudo crearla a la vez: la clave primaria lo impide.
+                    with suppress(IntegrityError), conn.begin_nested():
+                        conn.execute(
+                            insert(Schedule).values(
+                                name=item["name"],
+                                task=item["task"],
+                                cron=item["cron"],
+                                payload=payload,
+                                source="config",
+                            )
+                        )
+                    continue
+                if found.source != "config":
+                    continue
+                values: dict[str, Any] = {
+                    "task": item["task"],
+                    "cron": item["cron"],
+                    "payload": payload,
+                    "enabled": True,
+                    "updated_at": _NOW,
+                }
+                if found.cron != item["cron"] or not found.enabled:
+                    values["next_run_at"] = None
+                conn.execute(update(Schedule).where(Schedule.name == item["name"]).values(**values))
+            stale = update(Schedule).where(
+                Schedule.source == "config",
+                Schedule.enabled == True,  # noqa: E712 (SQL Server: = 1)
             )
             if names:
-                statement = statement.bindparams(bindparam("names", expanding=True))
-            conn.execute(statement, {"names": names} if names else {})
+                stale = stale.where(Schedule.name.not_in(names))
+            conn.execute(stale.values(enabled=False, updated_at=_NOW))
 
     def list_schedules(self) -> list[Row]:
-        return self._all("SELECT * FROM schedules ORDER BY name")
+        return self._all(select(Schedule).order_by(Schedule.name))
 
     def get_schedule(self, name: str) -> Row | None:
-        return self._one("SELECT * FROM schedules WHERE name = :n", {"n": name})
+        return self._one(select(Schedule).where(Schedule.name == name))
 
     def set_schedule_next(
         self, name: str, *, next_run_at: datetime, ran_at: datetime | None, job_id: int | None
     ) -> None:
-        self._exec(
-            """UPDATE schedules SET next_run_at = :next,
-                 last_run_at = COALESCE(:ran, last_run_at),
-                 last_job_id = COALESCE(:job, last_job_id), updated_at = SYSUTCDATETIME()
-               WHERE name = :n""",
-            {"n": name, "next": _utc(next_run_at), "ran": _utc(ran_at), "job": job_id},
-        )
+        values: dict[str, Any] = {"next_run_at": _utc(next_run_at), "updated_at": _NOW}
+        if ran_at is not None:
+            values["last_run_at"] = _utc(ran_at)
+        if job_id is not None:
+            values["last_job_id"] = job_id
+        self._exec(update(Schedule).where(Schedule.name == name).values(**values))
 
     def upsert_manual_schedule(
         self, *, name: str, task: str, cron: str, payload: dict[str, Any] | None
     ) -> None:
-        self._exec(
-            """MERGE schedules AS t USING (SELECT :name AS name) AS s ON t.name = s.name
-               WHEN MATCHED THEN UPDATE SET task = :task, cron = :cron, payload = :payload,
-                 source = N'manual', enabled = 1, next_run_at = NULL, updated_at = SYSUTCDATETIME()
-               WHEN NOT MATCHED THEN INSERT (name, task, cron, payload, source)
-                 VALUES (:name, :task, :cron, :payload, N'manual');""",
-            {"name": name, "task": task, "cron": cron, "payload": _json(payload or {})},
-        )
+        values = {
+            "task": task,
+            "cron": cron,
+            "payload": _json(payload or {}),
+            "source": "manual",
+            "enabled": True,
+            "next_run_at": None,
+        }
+        with self.db.begin() as conn:
+            updated = conn.execute(
+                update(Schedule).where(Schedule.name == name).values(updated_at=_NOW, **values)
+            ).rowcount
+            if not updated:
+                conn.execute(insert(Schedule).values(name=name, **values))
 
     def set_schedule_enabled(self, name: str, enabled: bool) -> bool:
+        # A mano deja de seguir a INVOICEBOT_SCHEDULE_* (si no, la configuración la revertiría).
         return (
             self._exec(
-                # A mano deja de seguir a INVOICEBOT_SCHEDULE_* (si no, la configuración la revertiría).
-                """UPDATE schedules SET enabled = :e, next_run_at = NULL, source = N'manual',
-                     updated_at = SYSUTCDATETIME() WHERE name = :n""",
-                {"n": name, "e": 1 if enabled else 0},
+                update(Schedule)
+                .where(Schedule.name == name)
+                .values(enabled=enabled, next_run_at=None, source="manual", updated_at=_NOW)
             )
             > 0
         )
