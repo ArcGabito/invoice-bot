@@ -49,6 +49,8 @@ def configured_schedules(config: Config) -> list[dict[str, Any]]:
         ("purge", s.purge, "jobs.purge", True),
         ("approvals", s.approvals, "approvals.remind", config.purchasing.enabled),
         ("webhooks", s.webhooks, "webhooks.sweep", True),
+        ("reverify", s.reverify, "sunat.reverify", config.sunat.enabled),
+        ("compliance", s.compliance, "compliance.alerts", True),
     ]
     return [
         {"name": name, "cron": cron, "task": task, "payload": {}}

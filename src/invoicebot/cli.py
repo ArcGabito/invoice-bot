@@ -59,6 +59,17 @@ webhook_app = typer.Typer(
 app.add_typer(purchasing_app, name="purchasing")
 app.add_typer(approvals_app, name="approvals")
 app.add_typer(webhook_app, name="webhook")
+sire_app = typer.Typer(help="SIRE (Registro de Compras): import · reconcile", no_args_is_help=True)
+detraction_app = typer.Typer(
+    help="Detracciones: pending · deposit · payment-file", no_args_is_help=True
+)
+taxpayer_app = typer.Typer(
+    help="Condición tributaria de proveedores: set · import-padron · retentions",
+    no_args_is_help=True,
+)
+app.add_typer(sire_app, name="sire")
+app.add_typer(detraction_app, name="detractions")
+app.add_typer(taxpayer_app, name="taxpayers")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(db_app, name="db")
@@ -1842,6 +1853,207 @@ def webhook_events(
             out.line(
                 f"  {e['time']:%Y-%m-%d %H:%M:%S} {e['type']:<30} {e['subject'] or ''} · {states}"
             )
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Cumplimiento tributario ---------------------------------------------------------------
+
+
+@sire_app.command("import")
+def sire_import(
+    path: Path,
+    period: Annotated[str, typer.Option(help="AAAA-MM")],
+    company: Annotated[str | None, typer.Option(help="RUC de la empresa")] = None,
+) -> None:
+    """Importa la propuesta del Registro de Compras (RCE) descargada del SIRE."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tax import import_sire_proposal
+
+        result = import_sire_proposal(
+            ctx, path, period=period, company_ruc=company, created_by=ctx.reviewer
+        )
+        out.line(f"Propuesta {result['period']}: {result['rows']} comprobantes importados")
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@sire_app.command("reconcile")
+def sire_reconcile(
+    period: Annotated[str, typer.Option(help="AAAA-MM")],
+    company: Annotated[str | None, typer.Option(help="RUC de la empresa")] = None,
+    xlsx: Annotated[Path | None, typer.Option(help="Guarda las diferencias en Excel")] = None,
+) -> None:
+    """Cruza la propuesta del SIRE con los comprobantes registrados."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tax import reconcile, reconciliation_xlsx
+
+        data = reconcile(ctx, period=period, company_ruc=company)
+        s = data["summary"]
+        out.line(
+            f"Periodo {data['period']}: {s['matched']} coinciden · {s['only_sunat']} solo en SUNAT · "
+            f"{s['only_bot']} solo en InvoiceBot · {s['amount'] + s['igv'] + s['date']} con datos distintos"
+        )
+        for d in data["differences"][:50]:
+            out.line(
+                f"  {d['kind']:<10} {d['supplier_ruc']} {d['document_type']} {d['series']}-{d['number']}: {d['message']}"
+            )
+        if xlsx:
+            xlsx.write_bytes(reconciliation_xlsx(data))
+            out.line(f"Excel: {xlsx}")
+        out.data(data)
+        return ExitCode.PARTIAL if data["differences"] else ExitCode.OK
+
+    _run(command)
+
+
+@detraction_app.command("pending")
+def detractions_pending() -> None:
+    """Facturas sujetas a detracción sin constancia de depósito."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tax import pending_detractions
+
+        rows = pending_detractions(ctx)
+        for r in rows:
+            out.line(
+                f"  #{r['invoice_id']:<6} {r['invoice']:<16} {r['supplier_ruc']} código {r['detraction_code']} "
+                f"S/ {format_cents(r['deposit_cents'])} · cuenta {r['account'] or '—'} · {r['approval_status'] or 'sin aprobar'}"
+            )
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@detraction_app.command("deposit")
+def detractions_deposit(
+    invoice_id: int,
+    constancia: Annotated[str, typer.Option(help="Número de la constancia de depósito")],
+    deposit_date: Annotated[str, typer.Option("--date", help="AAAA-MM-DD")],
+    amount: Annotated[float, typer.Option(help="Soles depositados")],
+) -> None:
+    """Registra la constancia de depósito de una detracción."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tax import record_deposit
+
+        try:
+            day = date.fromisoformat(deposit_date)
+        except ValueError as error:
+            raise ConfigError("Usa la fecha AAAA-MM-DD") from error
+        row = record_deposit(
+            ctx,
+            invoice_id=invoice_id,
+            constancia=constancia,
+            deposit_date=day,
+            amount_cents=round(amount * 100),
+            created_by=ctx.reviewer,
+        )
+        out.line(f"Constancia {row['constancia']} registrada para la factura #{invoice_id}")
+        out.data(row)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@detraction_app.command("payment-file")
+def detractions_payment_file(
+    invoice_ids: Annotated[list[int], typer.Argument(help="Facturas a depositar")],
+    lot: Annotated[str, typer.Option(help="Lote AANNNN, p. ej. 260001")],
+    output: Annotated[Path, typer.Option("--output", "-o")],
+    company: Annotated[str | None, typer.Option(help="RUC de la empresa")] = None,
+) -> None:
+    """Genera el archivo de depósito masivo de detracciones (verifica el formato vigente)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tax import detraction_payment_file
+
+        content = detraction_payment_file(
+            ctx, invoice_ids=invoice_ids, lot=lot, company_ruc=company
+        )
+        output.write_text(content, encoding="ascii", newline="")
+        out.line(f"Archivo {output} con {len(invoice_ids)} detracciones")
+        out.data({"path": str(output), "invoices": invoice_ids})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@taxpayer_app.command("set")
+def taxpayers_set(
+    ruc: str,
+    good_taxpayer: Annotated[
+        bool | None, typer.Option("--good-taxpayer/--no-good-taxpayer")
+    ] = None,
+    retention_agent: Annotated[
+        bool | None, typer.Option("--retention-agent/--no-retention-agent")
+    ] = None,
+    perception_agent: Annotated[
+        bool | None, typer.Option("--perception-agent/--no-perception-agent")
+    ] = None,
+) -> None:
+    """Condición tributaria de un proveedor (para calcular retenciones)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tax import set_supplier_status
+
+        row = set_supplier_status(
+            ctx,
+            ruc,
+            good_taxpayer=good_taxpayer,
+            retention_agent=retention_agent,
+            perception_agent=perception_agent,
+        )
+        out.line(
+            f"{row['ruc']}: buen contribuyente {row['good_taxpayer']}, agente de retención {row['retention_agent']}, agente de percepción {row['perception_agent']}"
+        )
+        out.data(row)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@taxpayer_app.command("import-padron")
+def taxpayers_import(
+    path: Path, kind: Annotated[str, typer.Option(help="good | retention | perception")]
+) -> None:
+    """Importa un padrón de SUNAT (RUC en la primera columna)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tax import import_padron
+
+        result = import_padron(ctx, path, kind=kind)
+        out.line(f"{result['imported']} contribuyentes del padrón {kind}")
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@taxpayer_app.command("retentions")
+def taxpayers_retentions(
+    month: Annotated[str, typer.Option(help="AAAA-MM")],
+    company: Annotated[str | None, typer.Option(help="RUC de la empresa")] = None,
+) -> None:
+    """Retenciones del IGV (3 %) de las facturas autorizadas del mes."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.tax import retention_report
+
+        rows = retention_report(ctx, month=month, company_ruc=company)
+        for r in rows:
+            if r["retention_cents"]:
+                out.line(
+                    f"  {r['invoice']:<16} {r['supplier_ruc']} total S/ {format_cents(r['total_pen_cents'])} → retener S/ {format_cents(r['retention_cents'])}"
+                )
+        out.line(f"Total a retener: S/ {format_cents(sum(r['retention_cents'] for r in rows))}")
         out.data(rows)
         return ExitCode.OK
 

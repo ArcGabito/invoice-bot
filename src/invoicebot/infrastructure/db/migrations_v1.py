@@ -441,4 +441,59 @@ M008 = Migration(
     ),
 )
 
-V1_MIGRATIONS = (M005, M006, M007, M008)
+#: Cumplimiento tributario: propuesta del SIRE (Registro de Compras), constancias de
+#: depósito de detracciones y condición tributaria de los proveedores (retenciones).
+M009 = Migration(
+    9,
+    "009_tax_compliance",
+    (
+        f"""CREATE TABLE sire_proposals (
+      id          INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_sire_proposals PRIMARY KEY,
+      company_id  INT NULL CONSTRAINT fk_sire_proposals_company REFERENCES companies (id),
+      period      NCHAR(6)      NOT NULL,
+      source      NVARCHAR(10)  NOT NULL CONSTRAINT df_sire_proposals_source DEFAULT N'file',
+      file_name   NVARCHAR(260) NULL,
+      row_count   INT           NOT NULL CONSTRAINT df_sire_proposals_rows DEFAULT 0,
+      created_by  NVARCHAR(150) NULL,
+      created_at  DATETIME2(3)  NOT NULL {_NOW.format("sire_proposals")}
+    )""",
+        "CREATE INDEX ix_sire_proposals_period ON sire_proposals (period, company_id, id DESC)",
+        """CREATE TABLE sire_entries (
+      id            BIGINT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_sire_entries PRIMARY KEY,
+      proposal_id   INT NOT NULL CONSTRAINT fk_sire_entries_proposal REFERENCES sire_proposals (id) ON DELETE CASCADE,
+      supplier_ruc  NVARCHAR(15)  NULL,
+      document_type NVARCHAR(2)   NULL,
+      series        NVARCHAR(20)  NULL,
+      number        NVARCHAR(20)  NULL,
+      issue_date    DATE          NULL,
+      currency      NVARCHAR(3)   NULL,
+      total_cents   BIGINT        NULL,
+      igv_cents     BIGINT        NULL,
+      car           NVARCHAR(40)  NULL,
+      raw           NVARCHAR(MAX) NULL
+    )""",
+        "CREATE INDEX ix_sire_entries_proposal ON sire_entries (proposal_id)",
+        "CREATE INDEX ix_sire_entries_key ON sire_entries (supplier_ruc, document_type, series, number)",
+        f"""CREATE TABLE detraction_deposits (
+      id           INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_detraction_deposits PRIMARY KEY,
+      invoice_id   INT NOT NULL CONSTRAINT fk_detraction_deposits_invoice REFERENCES invoices (id) ON DELETE CASCADE,
+      constancia   NVARCHAR(20)  NOT NULL CONSTRAINT uq_detraction_deposits UNIQUE,
+      deposit_date DATE          NOT NULL,
+      amount_cents BIGINT        NOT NULL,
+      source       NVARCHAR(20)  NOT NULL CONSTRAINT df_detraction_deposits_source DEFAULT N'manual',
+      created_by   NVARCHAR(150) NULL,
+      created_at   DATETIME2(3)  NOT NULL {_NOW.format("detraction_deposits")}
+    )""",
+        "CREATE INDEX ix_detraction_deposits_invoice ON detraction_deposits (invoice_id)",
+        """CREATE TABLE supplier_tax_status (
+      ruc               NVARCHAR(11) NOT NULL CONSTRAINT pk_supplier_tax_status PRIMARY KEY,
+      good_taxpayer     BIT          NOT NULL CONSTRAINT df_sts_good DEFAULT 0,
+      retention_agent   BIT          NOT NULL CONSTRAINT df_sts_retention DEFAULT 0,
+      perception_agent  BIT          NOT NULL CONSTRAINT df_sts_perception DEFAULT 0,
+      source            NVARCHAR(20) NOT NULL CONSTRAINT df_sts_source DEFAULT N'manual',
+      updated_at        DATETIME2(3) NOT NULL CONSTRAINT df_sts_updated DEFAULT SYSUTCDATETIME()
+    )""",
+    ),
+)
+
+V1_MIGRATIONS = (M005, M006, M007, M008, M009)

@@ -234,6 +234,8 @@ class ScheduleConfig:
     purge: str | None
     approvals: str | None
     webhooks: str | None
+    reverify: str | None
+    compliance: str | None
     #: Días que se conservan los trabajos terminados.
     job_retention_days: int
 
@@ -661,6 +663,9 @@ def load_config(
             purge=cron("INVOICEBOT_SCHEDULE_PURGE", "30 3 * * *"),
             approvals=cron("INVOICEBOT_SCHEDULE_APPROVALS", "15 * * * *"),
             webhooks=cron("INVOICEBOT_SCHEDULE_WEBHOOKS", "*/5 * * * *"),
+            # Antes del cierre: reconsulta en SUNAT los comprobantes del mes anterior.
+            reverify=cron("INVOICEBOT_SCHEDULE_REVERIFY", "0 7 3 * *"),
+            compliance=cron("INVOICEBOT_SCHEDULE_COMPLIANCE", "0 8 * * 1-5"),
             job_retention_days=r.integer("INVOICEBOT_JOB_RETENTION_DAYS", 30, 1, 3650),
         ),
         oidc=OidcConfig(

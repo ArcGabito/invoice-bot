@@ -46,6 +46,8 @@ EVENT_TYPES = {
     "approval.escalated": "Una aprobación vencida pasó al siguiente responsable",
     "invoice.approved_for_payment": "La factura quedó autorizada para pago",
     "invoice.payment_rejected": "La factura fue rechazada en la aprobación",
+    "tax.annotation_deadline": "Un comprobante está cerca de perder el crédito fiscal",
+    "detraction.pending": "Una factura autorizada tiene la detracción sin depositar",
 }
 
 
