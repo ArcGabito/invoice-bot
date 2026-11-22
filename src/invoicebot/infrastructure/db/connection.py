@@ -24,6 +24,7 @@ from typing import Any
 
 import pyodbc
 from sqlalchemy import Connection, Engine, create_engine, event, text
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
 from invoicebot.config import DbConfig
@@ -354,6 +355,16 @@ class Database:
     def connect(self) -> Iterator[Connection]:
         with self.engine.connect() as conn:
             yield conn
+
+    @contextmanager
+    def session(self) -> Iterator[Session]:
+        """Sesión ORM en una transacción: se confirma al salir sin error.
+
+        Usa el mismo motor (y el mismo pool) que el resto: aplica igual la Row-Level
+        Security por empresa y el actor de la auditoría.
+        """
+        with Session(self.engine, expire_on_commit=False) as session, session.begin():
+            yield session
 
     def raw_connection(self, *, autocommit: bool = True) -> Any:
         """Conexión pyodbc fuera del pool (candados de sesión, BACKUP DATABASE)."""

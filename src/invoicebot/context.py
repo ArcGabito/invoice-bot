@@ -156,7 +156,40 @@ class AppContext:
             vision_extractor=self.vision_extractor,
             today=self.config.today(),
             logger=self.logger,
+            extra=self._hooks(),
         )
+
+    def _hooks(self) -> dict[str, Any]:
+        if not self.config.purchasing.enabled:
+            return {}
+        return {"after_invoice_saved": self.after_invoice_saved}
+
+    def after_invoice_saved(self, invoice_id: int) -> None:
+        """Cada factura guardada pasa por el match de compras (en la cola `default`)."""
+        try:
+            self.jobs.enqueue(
+                "purchasing.match", {"invoice_id": invoice_id}, dedupe_key=f"match:{invoice_id}"
+            )
+        except Exception as error:  # el comprobante ya está guardado; el match se reintenta
+            self.logger.warning("no se pudo encolar el match de #%s: %s", invoice_id, error)
+
+    def after_review_approved(self, invoice_id: int) -> None:
+        """Con la revisión aprobada empieza la aprobación de pago."""
+        if self.config.purchasing.enabled:
+            self.jobs.enqueue(
+                "approvals.start", {"invoice_id": invoice_id}, dedupe_key=f"approval:{invoice_id}"
+            )
+
+    def public_url(self, path: str) -> str:
+        base = self.config.public_url or ""
+        return f"{base}{path}"
+
+    @cached_property
+    def http(self) -> Any:
+        """Cliente HTTP para webhooks (se puede reemplazar en pruebas)."""
+        import httpx
+
+        return httpx.Client(timeout=15, follow_redirects=False)
 
     def review_deps(self) -> Deps:
         """Para revisar no hacen falta IA ni OCR: no se crean (ni se validan sus credenciales)."""
@@ -313,6 +346,7 @@ class AppContext:
             vision_extractor=vision,
             today=self.config.today(),
             logger=self.logger,
+            extra=self._hooks(),
         )
 
     def limited_sunat_client(self) -> Any:

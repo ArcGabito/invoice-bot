@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>InvoiceBot · Aprobación de pago</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login">
+  <main class="login-card">
+    <h1>Aprobación de pago</h1>
+    {% if done %}
+      <p>Listo: la factura quedó <strong>{{ {"approved": "autorizada para pago", "pending": "aprobada en este nivel (sigue el siguiente)", "rejected": "rechazada", "not_required": "autorizada"}.get(done.approval_status, done.approval_status) }}</strong>.</p>
+    {% elif item %}
+      <p class="muted">Nivel {{ item.level }} · para {{ item.approver }}</p>
+      <dl>
+        <dt>Comprobante</dt><dd>{{ item.invoice }}</dd>
+        <dt>Proveedor</dt><dd>{{ item.supplier_name or "" }} ({{ item.supplier_ruc }})</dd>
+        <dt>Importe</dt><dd>{{ item.currency }} {{ "{:,.2f}".format((item.total_cents or 0) / 100) }}</dd>
+        {% if item.due_date %}<dt>Vence</dt><dd>{{ item.due_date }}</dd>{% endif %}
+        {% if item.cost_center %}<dt>Centro de costo</dt><dd>{{ item.cost_center }}</dd>{% endif %}
+      </dl>
+      <form method="post">
+        <label>Comentario (obligatorio para rechazar)
+          <textarea name="comment" maxlength="1000" rows="3"></textarea>
+        </label>
+        <button type="submit" name="decision" value="approve" class="primary">Aprobar pago</button>
+        <button type="submit" name="decision" value="reject">Rechazar</button>
+      </form>
+    {% else %}
+      <p class="error" role="alert">{{ error or "El enlace ya se usó o caducó. Revisa la bandeja de aprobaciones." }}</p>
+    {% endif %}
+  </main>
+</body>
+</html>

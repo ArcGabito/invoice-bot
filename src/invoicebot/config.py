@@ -175,6 +175,17 @@ class RunConfig:
 
 
 @dataclass(frozen=True)
+class PurchasingConfig:
+    """Match con órdenes de compra y aprobación de pago."""
+
+    enabled: bool
+    tolerance_percent: float
+    tolerance_cents: int
+    #: Aprueba la revisión sola si la factura es válida y coincide con su orden de compra.
+    auto_approve_matched: bool
+
+
+@dataclass(frozen=True)
 class OidcConfig:
     """Inicio de sesión con Microsoft Entra ID, Google Workspace u otro proveedor OIDC."""
 
@@ -221,6 +232,8 @@ class ScheduleConfig:
     export: str | None
     backup: str | None
     purge: str | None
+    approvals: str | None
+    webhooks: str | None
     #: Días que se conservan los trabajos terminados.
     job_retention_days: int
 
@@ -250,6 +263,9 @@ class Config:
     queue: QueueConfig
     schedule: ScheduleConfig
     oidc: OidcConfig
+    purchasing: PurchasingConfig
+    #: URL pública de la API (enlaces de aprobación en los correos).
+    public_url: str | None
     timezone: str
     reviewer: str | None
     env: Mapping[str, str] = field(repr=False, compare=False, default_factory=dict)
@@ -643,6 +659,8 @@ def load_config(
             export=cron("INVOICEBOT_SCHEDULE_EXPORT", "0 6 * * *"),
             backup=cron("INVOICEBOT_SCHEDULE_BACKUP", "0 2 * * *"),
             purge=cron("INVOICEBOT_SCHEDULE_PURGE", "30 3 * * *"),
+            approvals=cron("INVOICEBOT_SCHEDULE_APPROVALS", "15 * * * *"),
+            webhooks=cron("INVOICEBOT_SCHEDULE_WEBHOOKS", "*/5 * * * *"),
             job_retention_days=r.integer("INVOICEBOT_JOB_RETENTION_DAYS", 30, 1, 3650),
         ),
         oidc=OidcConfig(
@@ -660,6 +678,15 @@ def load_config(
             label=r.text("INVOICEBOT_OIDC_LABEL", default_label) or default_label,
             redirect_url=r.url("INVOICEBOT_OIDC_REDIRECT_URL"),
         ),
+        purchasing=PurchasingConfig(
+            enabled=r.flag("INVOICEBOT_PURCHASING_ENABLED", True),
+            tolerance_percent=r.number("INVOICEBOT_MATCH_TOLERANCE_PERCENT", 1.0, 0, 50),
+            tolerance_cents=round(
+                r.number("INVOICEBOT_MATCH_TOLERANCE_AMOUNT", 10.0, 0, 100_000) * 100
+            ),
+            auto_approve_matched=r.flag("INVOICEBOT_AUTO_APPROVE_MATCHED", False),
+        ),
+        public_url=(r.url("INVOICEBOT_PUBLIC_URL") or "").rstrip("/") or None,
         timezone=timezone,
         reviewer=overrides.get("reviewer") or r.text("INVOICEBOT_USER"),
         env=env,
