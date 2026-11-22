@@ -44,6 +44,8 @@ jobs_app = typer.Typer(
 schedule_app = typer.Typer(
     help="Tareas programadas: list · tick · set · enable · disable", no_args_is_help=True
 )
+company_app = typer.Typer(help="Empresas (multiempresa): add · list · set", no_args_is_help=True)
+app.add_typer(company_app, name="company")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(db_app, name="db")
@@ -1037,6 +1039,15 @@ def mail_login() -> None:
 # --- Usuarios y claves de API --------------------------------------------------------
 
 
+def _company_ids(ctx: AppContext, rucs: list[str] | None) -> list[int] | None:
+    """--company RUC (repetible) → ids; sin --company, todas las empresas (None)."""
+    if not rucs:
+        return None
+    from invoicebot.application.companies import require_company
+
+    return [int(require_company(ctx.companies, ruc)["id"]) for ruc in rucs]
+
+
 @user_app.command("add")
 def user_add(
     username: str,
@@ -1044,14 +1055,31 @@ def user_add(
     password: Annotated[
         str | None, typer.Option(help="Sin indicarla se genera una aleatoria")
     ] = None,
+    role: Annotated[
+        str, typer.Option(help="admin | accountant | approver | treasury | auditor")
+    ] = "admin",
+    email: Annotated[
+        str | None, typer.Option(help="Correo (para entrar con Microsoft o Google)")
+    ] = None,
+    company: Annotated[
+        list[str] | None, typer.Option(help="RUC de una empresa que puede ver (repetible)")
+    ] = None,
 ) -> None:
     """Da de alta a una persona en la pantalla de revisión."""
 
     def command(ctx: AppContext, out: Out) -> int:
         from invoicebot.application.users import add_user
 
-        result = add_user(ctx.users, username, display_name=name, password=password)
-        out.line(f"Usuario {result.user['username']} creado.")
+        result = add_user(
+            ctx.users,
+            username,
+            display_name=name,
+            password=password,
+            role=role,
+            email=email,
+            company_ids=_company_ids(ctx, company),
+        )
+        out.line(f"Usuario {result.user['username']} creado con el rol {role}.")
         if result.generated:
             out.line(f"Contraseña (se muestra una sola vez): {result.password}")
         out.data({"user": result.user, "password": result.password if result.generated else None})
@@ -1066,7 +1094,7 @@ def user_list() -> None:
         users = ctx.users.list_users()
         for u in users:
             out.line(
-                f"  {u['username']} · {u['display_name']} · {'activo' if u['active'] else 'desactivado'} · último acceso {u['last_login_at'] or 'nunca'}"
+                f"  {u['username']} · {u['display_name']} · {u['role']} · {'activo' if u['active'] else 'desactivado'} · último acceso {u['last_login_at'] or 'nunca'}"
             )
         out.data(users)
         return ExitCode.OK
@@ -1112,17 +1140,90 @@ def user_enable(username: str) -> None:
     _run(command)
 
 
+@user_app.command("set-role")
+def user_set_role(
+    username: str,
+    role: Annotated[str, typer.Argument(help="admin | accountant | approver | treasury | auditor")],
+) -> None:
+    """Cambia el rol de un usuario."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.users import set_role
+
+        user = set_role(ctx.users, username, role)
+        out.line(f"{user['username']}: rol {user['role']}")
+        out.data(user)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@user_app.command("companies")
+def user_companies(
+    username: str,
+    company: Annotated[list[str] | None, typer.Option(help="RUC (repetible)")] = None,
+    all_companies: Annotated[bool, typer.Option("--all", help="Todas las empresas")] = False,
+) -> None:
+    """Limita a un usuario a ciertas empresas (o le da todas con --all)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.users import set_companies
+
+        if all_companies == bool(company):
+            raise ConfigError("Usa --company RUC (una o más veces) o --all")
+        user = set_companies(
+            ctx.users, username, None if all_companies else _company_ids(ctx, company)
+        )
+        scope = "todas" if user["all_companies"] else ", ".join(map(str, user["company_ids"]))
+        out.line(f"{user['username']}: empresas {scope}")
+        out.data(user)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@user_app.command("email")
+def user_email(username: str, email: str) -> None:
+    """Asocia un correo para entrar con Microsoft o Google."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.users import _require
+
+        user = _require(ctx.users, username)
+        ctx.users.set_email(user["id"], email)
+        out.line(f"{user['username']}: correo {email}")
+        out.data({"username": user["username"], "email": email})
+        return ExitCode.OK
+
+    _run(command)
+
+
 @key_app.command("create")
 def apikey_create(
     name: Annotated[str, typer.Argument(help="Sistema que la usará (p. ej. email-bot)")],
     scope: Annotated[str, typer.Option(help="read | write")] = "write",
+    company: Annotated[str | None, typer.Option(help="RUC: la clave solo ve esa empresa")] = None,
+    permissions: Annotated[
+        str | None,
+        typer.Option(
+            help="Permisos finos separados por comas (p. ej. documents:write,invoices:read)"
+        ),
+    ] = None,
 ) -> None:
     """Crea una clave de API (se muestra una sola vez)."""
 
     def command(ctx: AppContext, out: Out) -> int:
         from invoicebot.application.users import create_api_key
 
-        key, row = create_api_key(ctx.users, name, scope=scope, created_by=ctx.reviewer)
+        ids = _company_ids(ctx, [company] if company else None)
+        key, row = create_api_key(
+            ctx.users,
+            name,
+            scope=scope,
+            created_by=ctx.reviewer,
+            company_id=ids[0] if ids else None,
+            permissions=permissions,
+        )
         out.line(f"Clave {row['prefix']} ({scope}) para {row['name']}:")
         out.line(key)
         out.line(
@@ -1288,6 +1389,124 @@ def show_config() -> None:
                 "queue": {"backend": c.queue.backend, "namespace": c.queue.namespace},
             }
         )
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Empresas y auditoría ------------------------------------------------------------------
+
+
+@company_app.command("add")
+def company_add(
+    ruc: str,
+    name: str,
+    retention_agent: Annotated[
+        bool, typer.Option("--retention-agent", help="Agente de retención del IGV")
+    ] = False,
+    good_taxpayer: Annotated[
+        bool, typer.Option("--good-taxpayer", help="Buen contribuyente")
+    ] = False,
+) -> None:
+    """Registra una empresa (RUC adquirente) y le asigna sus comprobantes ya guardados."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.companies import add_company
+
+        company = add_company(
+            ctx.companies,
+            ruc=ruc,
+            name=name,
+            retention_agent=retention_agent,
+            good_taxpayer=good_taxpayer,
+        )
+        out.line(
+            f"Empresa {company['ruc']} · {company['name']} creada "
+            f"({company['assigned_invoices']} comprobantes asignados)."
+        )
+        out.data(company)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@company_app.command("list")
+def company_list() -> None:
+    """Empresas registradas."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        rows = ctx.companies.list_companies()
+        for c in rows:
+            flags = [
+                f
+                for f, on in (
+                    ("agente de retención", c["retention_agent"]),
+                    ("buen contribuyente", c["good_taxpayer"]),
+                )
+                if on
+            ]
+            state = "activa" if c["active"] else "inactiva"
+            out.line(
+                f"  {c['ruc']} · {c['name']} · {state}{' · ' + ', '.join(flags) if flags else ''}"
+            )
+        if not rows:
+            out.line("Sin empresas: InvoiceBot funciona como una sola empresa.")
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@company_app.command("set")
+def company_set(
+    ruc: str,
+    name: Annotated[str | None, typer.Option()] = None,
+    retention_agent: Annotated[
+        bool | None, typer.Option("--retention-agent/--no-retention-agent")
+    ] = None,
+    good_taxpayer: Annotated[
+        bool | None, typer.Option("--good-taxpayer/--no-good-taxpayer")
+    ] = None,
+    active: Annotated[bool | None, typer.Option("--active/--inactive")] = None,
+) -> None:
+    """Cambia los datos de una empresa (el historial queda en companies_history)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.companies import require_company
+
+        company = require_company(ctx.companies, ruc)
+        ctx.companies.update(
+            int(company["id"]),
+            name=name,
+            retention_agent=retention_agent,
+            good_taxpayer=good_taxpayer,
+            active=active,
+        )
+        updated = ctx.companies.get(int(company["id"]))
+        out.line(f"Empresa {ruc} actualizada.")
+        out.data(updated)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def history(invoice_id: int) -> None:
+    """Historial de cambios de una factura: cada estado, cuándo y quién lo hizo."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        versions = ctx.repository.invoice_history(invoice_id)
+        if not versions:
+            raise ConfigError(f"No existe la factura #{invoice_id}")
+        labels = {"I": "alta", "U": "cambio", "D": "baja"}
+        for v in versions:
+            reviewer = f" ({v['reviewed_by']})" if v["reviewed_by"] else ""
+            out.line(
+                f"  {v['changed_at']:%Y-%m-%d %H:%M:%S} {labels.get(v['operation'], v['operation'])} "
+                f"por {v['changed_by'] or '—'}: validación {v['validation_status']}, "
+                f"revisión {v['review_status']}{reviewer}, SUNAT {v['sunat_status'] or '—'}"
+            )
+        out.data({"invoice_id": invoice_id, "versions": versions})
         return ExitCode.OK
 
     _run(command)

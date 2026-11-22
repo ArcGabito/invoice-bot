@@ -13,7 +13,10 @@ from invoicebot.infrastructure.db.invoice_repository import as_row
 
 Row = dict[str, Any]
 
-_PUBLIC_COLUMNS = "id, username, display_name, active, created_at, updated_at, last_login_at"
+_PUBLIC_COLUMNS = (
+    "id, username, display_name, active, created_at, updated_at, last_login_at, role, email, "
+    "auth_provider, all_companies"
+)
 
 
 def hash_token(token: str) -> bytes:
@@ -52,11 +55,30 @@ class UserRepository:
         row = self._one("SELECT COUNT(*) AS n FROM users WHERE active = 1")
         return int((row or {}).get("n") or 0)
 
-    def insert(self, *, username: str, display_name: str, password_hash: str) -> int:
+    def insert(
+        self,
+        *,
+        username: str,
+        display_name: str,
+        password_hash: str,
+        role: str = "admin",
+        email: str | None = None,
+        auth_provider: str = "local",
+        external_subject: str | None = None,
+    ) -> int:
         row = self._one(
-            """INSERT INTO users (username, display_name, password_hash) OUTPUT inserted.id
-               VALUES (:u, :d, :p)""",
-            {"u": username, "d": display_name[:100], "p": password_hash},
+            """INSERT INTO users (username, display_name, password_hash, role, email,
+                 auth_provider, external_subject) OUTPUT inserted.id
+               VALUES (:u, :d, :p, :r, :e, :a, :s)""",
+            {
+                "u": username,
+                "d": display_name[:100],
+                "p": password_hash,
+                "r": role,
+                "e": (email or "").strip().lower()[:254] or None,
+                "a": auth_provider,
+                "s": external_subject,
+            },
         )
         assert row is not None
         return int(row["id"])
@@ -122,7 +144,8 @@ class UserRepository:
         if not token or len(token) > 100:
             return None
         return self._one(
-            """SELECT s.user_id, s.csrf_token, s.expires_at, u.username, u.display_name
+            """SELECT s.user_id, s.csrf_token, s.expires_at, u.username, u.display_name, u.role,
+                      u.all_companies
                FROM review_sessions s JOIN users u ON u.id = s.user_id
                WHERE s.token_hash = :h AND s.expires_at > SYSUTCDATETIME() AND u.active = 1
                  AND u.updated_at = s.user_version""",
@@ -135,23 +158,110 @@ class UserRepository:
                 "DELETE FROM review_sessions WHERE token_hash = :h", {"h": hash_token(token)}
             )
 
+    # --- Roles, empresas e identidad externa ---------------------------------------
+
+    def set_role(self, user_id: int, role: str) -> None:
+        self._exec("UPDATE users SET role = :r WHERE id = :id", {"r": role, "id": user_id})
+
+    def set_email(self, user_id: int, email: str | None) -> None:
+        self._exec(
+            "UPDATE users SET email = :e WHERE id = :id",
+            {"e": (email or "").strip().lower()[:254] or None, "id": user_id},
+        )
+
+    def set_companies(self, user_id: int, company_ids: list[int] | None) -> None:
+        """None: todas las empresas · lista: solo esas (vacía = ninguna)."""
+        with self.db.begin() as conn:
+            conn.execute(text("DELETE FROM user_companies WHERE user_id = :u"), {"u": user_id})
+            for company_id in company_ids or []:
+                conn.execute(
+                    text("INSERT INTO user_companies (user_id, company_id) VALUES (:u, :c)"),
+                    {"u": user_id, "c": company_id},
+                )
+            conn.execute(
+                text("UPDATE users SET all_companies = :a WHERE id = :u"),
+                {"a": 1 if company_ids is None else 0, "u": user_id},
+            )
+
+    def company_ids(self, user_id: int) -> list[int]:
+        return [
+            int(r["company_id"])
+            for r in self._all(
+                "SELECT company_id FROM user_companies WHERE user_id = :u ORDER BY company_id",
+                {"u": user_id},
+            )
+        ]
+
+    def find_by_email(self, email: str) -> Row | None:
+        return self._one("SELECT * FROM users WHERE email = :e", {"e": email.strip().lower()})
+
+    def find_by_subject(self, subject: str) -> Row | None:
+        return self._one("SELECT * FROM users WHERE external_subject = :s", {"s": subject})
+
+    def link_external(self, user_id: int, *, subject: str, provider: str = "oidc") -> None:
+        self._exec(
+            "UPDATE users SET external_subject = :s, auth_provider = :p WHERE id = :id",
+            {"s": subject[:200], "p": provider, "id": user_id},
+        )
+
+    # --- Inicio de sesión OIDC (estado entre la redirección y la vuelta) -------------
+
+    def save_oidc_request(
+        self, *, state: str, nonce: str, code_verifier: str, redirect_uri: str
+    ) -> None:
+        with self.db.begin() as conn:
+            conn.execute(
+                text(
+                    "DELETE FROM oidc_requests WHERE created_at < DATEADD(MINUTE, -15, SYSUTCDATETIME())"
+                )
+            )
+            conn.execute(
+                text(
+                    """INSERT INTO oidc_requests (state, nonce, code_verifier, redirect_uri)
+                       VALUES (:s, :n, :v, :r)"""
+                ),
+                {"s": state, "n": nonce, "v": code_verifier, "r": redirect_uri[:500]},
+            )
+
+    def pop_oidc_request(self, state: str) -> Row | None:
+        """La solicitud (de un solo uso, válida 10 minutos) o None."""
+        if not state or len(state) > 64:
+            return None
+        return self._one(
+            """DELETE FROM oidc_requests OUTPUT deleted.*
+               WHERE state = :s AND created_at > DATEADD(MINUTE, -10, SYSUTCDATETIME())""",
+            {"s": state},
+        )
+
     # --- Claves de API ---------------------------------------------------------
 
-    def create_api_key(self, *, name: str, scope: str, created_by: str | None) -> tuple[str, Row]:
+    def create_api_key(
+        self,
+        *,
+        name: str,
+        scope: str,
+        created_by: str | None,
+        company_id: int | None = None,
+        permissions: str | None = None,
+    ) -> tuple[str, Row]:
         """Crea una clave `ibk_<prefijo>_<secreto>`; se devuelve una sola vez."""
         prefix = secrets.token_hex(4)
         key = f"ibk_{prefix}_{secrets.token_urlsafe(32)}"
         row = self._one(
-            """INSERT INTO api_keys (name, prefix, key_hash, scope, created_by)
+            """INSERT INTO api_keys (name, prefix, key_hash, scope, created_by, company_id,
+                 permissions)
                OUTPUT inserted.id, inserted.name, inserted.prefix, inserted.scope,
-                      inserted.created_by, inserted.active, inserted.created_at
-               VALUES (:n, :p, :h, :s, :c)""",
+                      inserted.created_by, inserted.active, inserted.created_at,
+                      inserted.company_id, inserted.permissions
+               VALUES (:n, :p, :h, :s, :c, :company, :perm)""",
             {
                 "n": name[:100],
                 "p": f"ibk_{prefix}",
                 "h": hash_token(key),
                 "s": scope,
                 "c": (created_by or "")[:100] or None,
+                "company": company_id,
+                "perm": permissions,
             },
         )
         assert row is not None
@@ -161,7 +271,8 @@ class UserRepository:
         if not key or len(key) > 200 or not key.startswith("ibk_"):
             return None
         row = self._one(
-            "SELECT id, name, prefix, scope FROM api_keys WHERE key_hash = :h AND active = 1",
+            """SELECT id, name, prefix, scope, company_id, permissions FROM api_keys
+               WHERE key_hash = :h AND active = 1""",
             {"h": hash_token(key)},
         )
         if row:
@@ -174,8 +285,8 @@ class UserRepository:
 
     def list_api_keys(self) -> list[Row]:
         return self._all(
-            """SELECT id, name, prefix, scope, created_by, active, created_at, last_used_at,
-                      revoked_at FROM api_keys ORDER BY id"""
+            """SELECT id, name, prefix, scope, company_id, permissions, created_by, active,
+                      created_at, last_used_at, revoked_at FROM api_keys ORDER BY id"""
         )
 
     def revoke_api_key(self, prefix_or_id: str) -> int:

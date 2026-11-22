@@ -9,7 +9,7 @@ import hashlib
 import json
 import secrets
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -40,14 +40,17 @@ from invoicebot.api.security import (
     client_ip,
     cookie_name,
     is_secure_request,
-    require_write,
+    principal_dependency,
+    require,
 )
 from invoicebot.application import review
+from invoicebot.application.companies import add_company
 from invoicebot.application.exchange_rates import save_exchange_rates
 from invoicebot.application.reports import build_export, check_month, find_duplicates
-from invoicebot.application.users import authenticate
+from invoicebot.application.users import authenticate, resolve_oidc_user
 from invoicebot.application.verify_sunat import verify_sunat
 from invoicebot.context import AppContext
+from invoicebot.domain import access
 from invoicebot.domain.invoice import DOCUMENT_TYPES
 from invoicebot.domain.review import CORRECTABLE_FIELDS, ReviewStatus
 from invoicebot.errors import (
@@ -62,6 +65,7 @@ from invoicebot.infrastructure.db.invoice_repository import month_range
 from invoicebot.infrastructure.db.migration import schema_status
 from invoicebot.infrastructure.documents.scanner import SUPPORTED_EXTENSIONS
 from invoicebot.infrastructure.mail.attachments import safe_file_name
+from invoicebot.infrastructure.oidc import OidcError, pkce_pair
 from invoicebot.infrastructure.sunat import parse_date
 
 _HERE = Path(__file__).parent
@@ -155,6 +159,13 @@ class SunatBody(BaseModel):
     limit: int | None = Field(default=50, ge=1, le=1000)
 
 
+class CompanyBody(BaseModel):
+    ruc: str = Field(pattern=r"^\d{11}$")
+    name: str = Field(min_length=1, max_length=200)
+    retention_agent: bool = False
+    good_taxpayer: bool = False
+
+
 class JobBody(BaseModel):
     task: str = Field(max_length=100)
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -171,6 +182,13 @@ def _idempotency(principal: Principal, key: str | None) -> str | None:
 
 
 _FINAL_JOB_STATUSES = ("succeeded", "failed", "cancelled")
+
+_SSO_ERRORS = {
+    "sso_cancelled": "Se canceló el inicio de sesión.",
+    "sso_expired": "El inicio de sesión tardó demasiado: vuelve a intentarlo.",
+    "sso_failed": "El proveedor de identidad no confirmó tu cuenta.",
+    "sso_no_user": "Tu cuenta no tiene acceso a InvoiceBot: pide a un administrador que te dé de alta.",
+}
 
 
 def create_app(context: AppContext | None = None) -> FastAPI:
@@ -219,12 +237,27 @@ def create_app(context: AppContext | None = None) -> FastAPI:
             {"detail": "Datos no válidos", "errors": error.errors()}, status_code=422
         )
 
-    Auth = Annotated[Principal, Depends(authenticate_request)]
+    Auth = Annotated[Principal, Depends(principal_dependency)]
 
-    def writer(principal: Auth) -> Principal:
-        return require_write(principal)
+    def need(permission: str) -> Callable[[Principal], Principal]:
+        checker = require(permission)
 
-    Writer = Annotated[Principal, Depends(writer)]
+        def dependency(principal: Auth) -> Principal:
+            return checker(principal)
+
+        return dependency
+
+    Reader = Annotated[Principal, Depends(need(access.INVOICES_READ))]
+    Reviewer = Annotated[Principal, Depends(need(access.REVIEW_WRITE))]
+    Uploader = Annotated[Principal, Depends(need(access.DOCUMENTS_WRITE))]
+    Exporter = Annotated[Principal, Depends(need(access.EXPORTS_READ))]
+    FxWriter = Annotated[Principal, Depends(need(access.FX_WRITE))]
+    SunatWriter = Annotated[Principal, Depends(need(access.SUNAT_WRITE))]
+    Runner = Annotated[Principal, Depends(need(access.RUNS_WRITE))]
+    JobsReader = Annotated[Principal, Depends(need(access.JOBS_READ))]
+    JobsWriter = Annotated[Principal, Depends(need(access.JOBS_WRITE))]
+    AuditReader = Annotated[Principal, Depends(need(access.AUDIT_READ))]
+    Admin = Annotated[Principal, Depends(need(access.ADMIN))]
 
     # --- Salud -----------------------------------------------------------------------
 
@@ -251,7 +284,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         )
 
     @app.get("/metrics", include_in_schema=False, response_class=PlainTextResponse)
-    def metrics(_: Auth) -> Response:
+    def metrics(_: JobsReader) -> Response:
         """Métricas en formato Prometheus (requiere una clave de API de lectura)."""
         lines = [
             "# HELP invoicebot_info Versión de InvoiceBot.",
@@ -303,8 +336,101 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         )
 
     @app.get("/login", include_in_schema=False, response_class=HTMLResponse)
-    def login_page(request: Request) -> Response:
-        return templates.TemplateResponse(request, "login.html", {"version": __version__})
+    def login_page(request: Request, error: str | None = None) -> Response:
+        oidc = ctx.config.oidc
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {
+                "version": __version__,
+                "sso": oidc.label if oidc.enabled else None,
+                "error": _SSO_ERRORS.get(error or "", ""),
+            },
+        )
+
+    def _start_session(
+        request: Request, user: dict[str, Any], *, same_site: str = "strict"
+    ) -> tuple[Response, str]:
+        """Crea la sesión y su cookie. Tras volver del proveedor de identidad la cookie debe
+        ser Lax: con Strict, el navegador no la enviaría en la redirección que sigue."""
+        ip = client_ip(request)
+        hours = ctx.config.serve.session_hours
+        token, csrf = ctx.users.create_session(user["id"], hours=hours, ip=ip)
+        ctx.logger.info(
+            "acceso a la pantalla de revisión", extra={"username": user["username"], "ip": ip}
+        )
+        secure = is_secure_request(request, ctx.config.serve.cookie_secure)
+        response = ApiResponse({"ok": True, "csrf": csrf, "user": user["username"]})
+        response.set_cookie(
+            cookie_name(secure),
+            token,
+            max_age=hours * 3600,
+            httponly=True,
+            samesite="lax" if same_site == "lax" else "strict",
+            secure=secure,
+            path="/",
+        )
+        return response, token
+
+    @app.get("/auth/oidc/login", include_in_schema=False)
+    def oidc_login(request: Request) -> Response:
+        """Redirige al proveedor (Microsoft, Google…) con PKCE, state y nonce."""
+        if not ctx.config.oidc.enabled:
+            raise HTTPException(404, "Inicio de sesión único no configurado")
+        verifier, challenge = pkce_pair()
+        state, nonce = secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+        redirect_uri = ctx.config.oidc.redirect_url or str(request.url_for("oidc_callback"))
+        ctx.users.save_oidc_request(
+            state=state, nonce=nonce, code_verifier=verifier, redirect_uri=redirect_uri
+        )
+        url = ctx.oidc.authorization_url(
+            redirect_uri=redirect_uri, state=state, nonce=nonce, code_challenge=challenge
+        )
+        return RedirectResponse(url, status_code=303)
+
+    @app.get("/auth/oidc/callback", include_in_schema=False, name="oidc_callback")
+    def oidc_callback(
+        request: Request,
+        code: str | None = None,
+        state: str | None = None,
+        error: str | None = None,
+    ) -> Response:
+        if error or not code or not state:
+            return RedirectResponse("/login?error=sso_cancelled", status_code=303)
+        pending = ctx.users.pop_oidc_request(state)
+        if pending is None:
+            return RedirectResponse("/login?error=sso_expired", status_code=303)
+        settings = ctx.config.oidc
+        try:
+            tokens = ctx.oidc.exchange(
+                code=code,
+                redirect_uri=pending["redirect_uri"],
+                code_verifier=pending["code_verifier"],
+            )
+            identity = ctx.oidc.verify_id_token(tokens["id_token"], nonce=pending["nonce"])
+        except OidcError as failure:
+            ctx.logger.warning("inicio de sesión único rechazado: %s", failure.message)
+            return RedirectResponse("/login?error=sso_failed", status_code=303)
+        user = resolve_oidc_user(
+            ctx.users,
+            subject=identity.subject,
+            email=identity.email,
+            name=identity.name,
+            email_verified=identity.email_verified,
+            allowed_domains=settings.allowed_domains,
+            auto_create_role=settings.auto_create_role,
+        )
+        if user is None:
+            ctx.logger.warning(
+                "inicio de sesión único sin usuario", extra={"email": identity.email}
+            )
+            return RedirectResponse("/login?error=sso_no_user", status_code=303)
+        session_response, _token = _start_session(request, user, same_site="lax")
+        redirect = RedirectResponse("/", status_code=303)
+        for header, value in session_response.raw_headers:
+            if header.lower() == b"set-cookie":
+                redirect.raw_headers.append((header, value))
+        return redirect
 
     @app.post("/api/v1/auth/login", tags=["auth"])
     def login(body: LoginBody, request: Request) -> Response:
@@ -323,22 +449,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
             ctx.logger.warning("acceso rechazado", extra={"username": username, "ip": ip})
             raise HTTPException(401, "Usuario o contraseña incorrectos")
         throttle.clear(keys)
-        hours = ctx.config.serve.session_hours
-        token, csrf = ctx.users.create_session(user["id"], hours=hours, ip=ip)
-        ctx.logger.info(
-            "acceso a la pantalla de revisión", extra={"username": user["username"], "ip": ip}
-        )
-        secure = is_secure_request(request, ctx.config.serve.cookie_secure)
-        response = ApiResponse({"ok": True, "csrf": csrf, "user": user["username"]})
-        response.set_cookie(
-            cookie_name(secure),
-            token,
-            max_age=hours * 3600,
-            httponly=True,
-            samesite="strict",
-            secure=secure,
-            path="/",
-        )
+        response, _token = _start_session(request, user)
         return response
 
     @app.post("/api/v1/auth/logout", tags=["auth"])
@@ -358,12 +469,47 @@ def create_app(context: AppContext | None = None) -> FastAPI:
             "name": principal.name,
             "display_name": principal.display_name,
             "scope": principal.scope,
+            "role": principal.role,
+            "permissions": sorted(principal.permissions),
+            "companies": ctx.companies.list_companies(
+                ids=list(principal.company_ids) if principal.company_ids is not None else None
+            ),
+            "all_companies": principal.company_ids is None,
+        }
+
+    # --- Empresas y auditoría ---------------------------------------------------------
+
+    @app.get("/api/v1/companies", tags=["empresas"])
+    def list_companies(principal: Reader) -> dict[str, Any]:
+        ids = list(principal.company_ids) if principal.company_ids is not None else None
+        return {"items": ctx.companies.list_companies(ids=ids)}
+
+    @app.post("/api/v1/companies", tags=["empresas"], status_code=201)
+    def create_company(body: CompanyBody, principal: Admin) -> dict[str, Any]:
+        company = add_company(
+            ctx.companies,
+            ruc=body.ruc,
+            name=body.name,
+            retention_agent=body.retention_agent,
+            good_taxpayer=body.good_taxpayer,
+        )
+        ctx.logger.info("empresa creada", extra={"by": principal.signature, "ruc": body.ruc})
+        return company
+
+    @app.get("/api/v1/invoices/{invoice_id}/history", tags=["auditoría"])
+    def invoice_history(invoice_id: int, _: AuditReader) -> dict[str, Any]:
+        """Cada versión de la factura (tabla temporal de SQL Server) y las acciones de revisión."""
+        detail = review.get_invoice_detail(ctx.review_deps(), invoice_id)
+        return {
+            "invoice_id": invoice_id,
+            "versions": ctx.repository.invoice_history(invoice_id),
+            "actions": detail.get("actions", []),
         }
 
     # --- Consultas -------------------------------------------------------------------
 
     @app.get("/api/v1/meta", tags=["consultas"])
-    def meta(principal: Auth) -> dict[str, Any]:
+    def meta(principal: Reader) -> dict[str, Any]:
         return {
             "version": __version__,
             "reviewer": principal.signature,
@@ -372,7 +518,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         }
 
     @app.get("/api/v1/status", tags=["consultas"])
-    def status(_: Auth) -> dict[str, Any]:
+    def status(_: Reader) -> dict[str, Any]:
         repo = ctx.repository
         return {
             "summary": repo.get_status_summary(),
@@ -381,7 +527,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         }
 
     @app.get("/api/v1/queue", tags=["revisión"])
-    def queue(_: Auth, view: str = "pending") -> dict[str, Any]:
+    def queue(_: Reader, view: str = "pending") -> dict[str, Any]:
         repo = ctx.repository
         summary = repo.get_status_summary()
         counts = {
@@ -406,7 +552,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
 
     @app.get("/api/v1/invoices", tags=["consultas"])
     def list_invoices(
-        _: Auth,
+        _: Reader,
         month: str | None = None,
         validation_status: str | None = None,
         review_status: str | None = None,
@@ -428,11 +574,11 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
     @app.get("/api/v1/invoices/{invoice_id}", tags=["consultas"])
-    def invoice_detail(invoice_id: int, _: Auth) -> dict[str, Any]:
+    def invoice_detail(invoice_id: int, _: Reader) -> dict[str, Any]:
         return review.get_invoice_detail(ctx.review_deps(), invoice_id)
 
     @app.get("/api/v1/invoices/{invoice_id}/document", tags=["consultas"], response_model=None)
-    def invoice_document(invoice_id: int, _: Auth) -> Response:
+    def invoice_document(invoice_id: int, _: Reader) -> Response:
         detail = ctx.repository.get_invoice_detail(invoice_id)
         if not detail:
             raise HTTPException(404, "No existe la factura")
@@ -458,12 +604,12 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         )
 
     @app.get("/api/v1/duplicates", tags=["consultas"])
-    def duplicates(_: Auth) -> dict[str, Any]:
+    def duplicates(_: Reader) -> dict[str, Any]:
         return find_duplicates(ctx.review_deps())
 
     @app.get("/api/v1/exports", tags=["consultas"], response_model=None)
     def export(
-        _: Auth,
+        _: Exporter,
         month: str | None = None,
         format: Annotated[str, Query(pattern="^(csv|xlsx)$")] = "xlsx",
         include_errors: bool = False,
@@ -496,7 +642,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
     # --- Revisión --------------------------------------------------------------------
 
     @app.post("/api/v1/invoices/{invoice_id}/approve", tags=["revisión"])
-    def approve(invoice_id: int, body: NoteBody, principal: Writer) -> dict[str, Any]:
+    def approve(invoice_id: int, body: NoteBody, principal: Reviewer) -> dict[str, Any]:
         return review.approve_invoice(
             ctx.review_deps(),
             invoice_id,
@@ -506,19 +652,19 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         )
 
     @app.post("/api/v1/invoices/{invoice_id}/reject", tags=["revisión"])
-    def reject(invoice_id: int, body: RejectBody, principal: Writer) -> dict[str, Any]:
+    def reject(invoice_id: int, body: RejectBody, principal: Reviewer) -> dict[str, Any]:
         return review.reject_invoice(
             ctx.review_deps(), invoice_id, user=principal.signature, reason=body.reason
         )
 
     @app.post("/api/v1/invoices/{invoice_id}/reopen", tags=["revisión"])
-    def reopen(invoice_id: int, body: NoteBody, principal: Writer) -> dict[str, Any]:
+    def reopen(invoice_id: int, body: NoteBody, principal: Reviewer) -> dict[str, Any]:
         return review.reopen_invoice(
             ctx.review_deps(), invoice_id, user=principal.signature, note=body.note
         )
 
     @app.post("/api/v1/invoices/{invoice_id}/correct", tags=["revisión"])
-    def correct(invoice_id: int, body: CorrectBody, principal: Writer) -> dict[str, Any]:
+    def correct(invoice_id: int, body: CorrectBody, principal: Reviewer) -> dict[str, Any]:
         if not body.changes:
             raise HTTPException(400, "Faltan los cambios")
         return review.correct_invoice(
@@ -530,7 +676,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         )
 
     @app.post("/api/v1/issues/{issue_id}/resolve", tags=["revisión"])
-    def resolve(issue_id: int, body: NoteBody, principal: Writer) -> dict[str, Any]:
+    def resolve(issue_id: int, body: NoteBody, principal: Reviewer) -> dict[str, Any]:
         return review.resolve_issue(
             ctx.review_deps(), issue_id, user=principal.signature, note=body.note
         )
@@ -544,7 +690,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         responses={202: {"description": "Recibidos y encolados (cola Redis)"}},
     )
     async def upload_documents(
-        principal: Writer,
+        principal: Uploader,
         files: Annotated[
             list[UploadFile],
             File(description="XML, PDF, PNG o JPG; el XML y su PDF juntos se vinculan"),
@@ -624,7 +770,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
     # --- Tipo de cambio --------------------------------------------------------------
 
     @app.get("/api/v1/fx", tags=["tipo de cambio"])
-    def list_fx(_: Auth, month: str | None = None, currency: str = "USD") -> dict[str, Any]:
+    def list_fx(_: Reader, month: str | None = None, currency: str = "USD") -> dict[str, Any]:
         today = ctx.config.today()
         month = check_month(month) or today[:7]
         start, following = month_range(month)
@@ -635,7 +781,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         return {"month": month, "items": items}
 
     @app.post("/api/v1/fx", tags=["tipo de cambio"])
-    def set_fx(body: ExchangeRateBody, _: Writer) -> dict[str, Any]:
+    def set_fx(body: ExchangeRateBody, _: FxWriter) -> dict[str, Any]:
         day = parse_date(body.date)
         if not day:
             raise HTTPException(400, "Fecha no válida (usa AAAA-MM-DD o DD/MM/AAAA)")
@@ -651,7 +797,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
     # --- SUNAT y ciclos del bot ------------------------------------------------------
 
     @app.post("/api/v1/sunat/verify", tags=["sunat"])
-    def sunat_verify(body: SunatBody, _: Writer) -> dict[str, Any]:
+    def sunat_verify(body: SunatBody, _: SunatWriter) -> dict[str, Any]:
         check_month(body.month)
         summary = verify_sunat(
             ctx.review_deps(),
@@ -663,18 +809,18 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         return summary.as_dict()
 
     @app.get("/api/v1/runs", tags=["bot"])
-    def runs(_: Auth, limit: Annotated[int, Query(ge=1, le=100)] = 20) -> dict[str, Any]:
+    def runs(_: JobsReader, limit: Annotated[int, Query(ge=1, le=100)] = 20) -> dict[str, Any]:
         return {"items": ctx.repository.list_bot_runs(limit)}
 
     @app.get("/api/v1/runs/{run_id}", tags=["bot"])
-    def run_detail(run_id: int, _: Auth) -> dict[str, Any]:
+    def run_detail(run_id: int, _: JobsReader) -> dict[str, Any]:
         row = ctx.repository.get_bot_run(run_id)
         if not row:
             raise HTTPException(404, "No existe la ejecución")
         return row
 
     @app.post("/api/v1/runs", tags=["bot"], status_code=202)
-    def start_run(principal: Writer) -> dict[str, Any]:
+    def start_run(principal: Runner) -> dict[str, Any]:
         """Lanza un ciclo en segundo plano (el candado de SQL Server evita dos a la vez).
 
         Con la cola Redis el ciclo es un trabajo `bot.cycle` que ejecuta un worker.
@@ -716,7 +862,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
     # --- Trabajos en cola ------------------------------------------------------------
 
     @app.get("/api/v1/tasks", tags=["trabajos"])
-    def list_tasks(_: Auth) -> dict[str, Any]:
+    def list_tasks(_: JobsReader) -> dict[str, Any]:
         from invoicebot.application.tasks import registry
 
         return {
@@ -729,7 +875,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
 
     @app.get("/api/v1/jobs", tags=["trabajos"])
     def list_jobs(
-        _: Auth,
+        _: JobsReader,
         status: str | None = None,
         task: str | None = None,
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -741,7 +887,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
     @app.post("/api/v1/jobs", tags=["trabajos"], status_code=202)
     def create_job(
         body: JobBody,
-        principal: Writer,
+        principal: JobsWriter,
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     ) -> dict[str, Any]:
         """Encola una tarea (`GET /api/v1/tasks`) con sus parámetros."""
@@ -760,13 +906,13 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         return job
 
     @app.get("/api/v1/jobs/{job_id}", tags=["trabajos"])
-    def job_detail(job_id: int, _: Auth) -> dict[str, Any]:
+    def job_detail(job_id: int, _: JobsReader) -> dict[str, Any]:
         job = _job_or_404(job_id)
         job["children"] = ctx.job_repository.children(job_id)
         return job
 
     @app.get("/api/v1/jobs/{job_id}/events", tags=["trabajos"])
-    async def job_events(job_id: int, _: Auth, request: Request) -> Response:
+    async def job_events(job_id: int, _: JobsReader, request: Request) -> Response:
         """Progreso en vivo (Server-Sent Events) hasta que el trabajo termina."""
         from starlette.concurrency import run_in_threadpool
 
@@ -799,7 +945,7 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         )
 
     @app.post("/api/v1/jobs/{job_id}/retry", tags=["trabajos"])
-    def retry_job(job_id: int, _: Writer) -> dict[str, Any]:
+    def retry_job(job_id: int, _: JobsWriter) -> dict[str, Any]:
         job = ctx.job_repository.requeue(job_id, extra_attempts=1)
         if job is None:
             raise HTTPException(409, "Solo se reintenta un trabajo fallido o cancelado")
@@ -807,14 +953,14 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         return ctx.job_repository.get(job_id) or job
 
     @app.post("/api/v1/jobs/{job_id}/cancel", tags=["trabajos"])
-    def cancel_job(job_id: int, _: Writer) -> dict[str, Any]:
+    def cancel_job(job_id: int, _: JobsWriter) -> dict[str, Any]:
         _job_or_404(job_id)
         if not ctx.job_repository.cancel(job_id):
             raise HTTPException(409, "El trabajo ya empezó o terminó")
         return {"id": job_id, "status": "cancelled"}
 
     @app.get("/api/v1/schedules", tags=["trabajos"])
-    def list_schedules(_: Auth) -> dict[str, Any]:
+    def list_schedules(_: JobsReader) -> dict[str, Any]:
         return {"items": ctx.job_repository.list_schedules()}
 
     return app

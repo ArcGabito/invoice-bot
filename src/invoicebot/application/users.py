@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from invoicebot.domain.access import ROLES, AccessError, parse_permissions
 from invoicebot.errors import UserError
 from invoicebot.infrastructure.db.user_repository import UserRepository
 from invoicebot.infrastructure.security import (
@@ -53,26 +54,61 @@ class UserWithPassword:
     generated: bool
 
 
+def _check_role(role: str) -> str:
+    if role not in ROLES:
+        raise UserError(f"Rol desconocido {role!r} (usa {', '.join(ROLES)})")
+    return role
+
+
 def add_user(
     users: UserRepository,
     username: str,
     *,
     display_name: str | None = None,
     password: str | None = None,
+    role: str = "admin",
+    email: str | None = None,
+    company_ids: list[int] | None = None,
 ) -> UserWithPassword:
+    """Crea un usuario. ``company_ids`` None = todas las empresas."""
     name = normalize_username(username)
     if users.find_by_username(name):
         raise UserError(f'El usuario "{name}" ya existe')
+    if email and users.find_by_email(email):
+        raise UserError(f"Ya hay un usuario con el correo {email}")
     generated = password is None
     secret = generate_password() if generated else _check_password(password)
     user_id = users.insert(
         username=name,
         display_name=(display_name or "").strip() or name,
         password_hash=hash_password(secret),
+        role=_check_role(role),
+        email=email,
     )
+    if company_ids is not None:
+        users.set_companies(user_id, company_ids)
     user = users.get_by_id(user_id)
     assert user is not None
     return UserWithPassword(user, secret, generated)
+
+
+def set_role(users: UserRepository, username: str, role: str) -> dict[str, Any]:
+    user = _require(users, username)
+    users.set_role(user["id"], _check_role(role))
+    public = users.get_by_id(user["id"])
+    assert public is not None
+    return public
+
+
+def set_companies(
+    users: UserRepository, username: str, company_ids: list[int] | None
+) -> dict[str, Any]:
+    user = _require(users, username)
+    users.set_companies(user["id"], company_ids)
+    public = users.get_by_id(user["id"])
+    assert public is not None
+    public["company_ids"] = users.company_ids(user["id"])
+    return public
 
 
 def reset_password(
@@ -115,11 +151,82 @@ def authenticate(
 
 
 def create_api_key(
-    users: UserRepository, name: str, *, scope: str, created_by: str | None
+    users: UserRepository,
+    name: str,
+    *,
+    scope: str,
+    created_by: str | None,
+    company_id: int | None = None,
+    permissions: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     label = (name or "").strip()
     if not label:
         raise UserError("Indica un nombre para la clave (p. ej. el sistema que la usará)")
     if scope not in ("read", "write"):
         raise UserError("El alcance de la clave debe ser read o write")
-    return users.create_api_key(name=label, scope=scope, created_by=created_by)
+    normalized = None
+    if permissions:
+        try:
+            normalized = ",".join(sorted(parse_permissions(permissions)))
+        except AccessError as error:
+            raise UserError(str(error)) from error
+    return users.create_api_key(
+        name=label,
+        scope=scope,
+        created_by=created_by,
+        company_id=company_id,
+        permissions=normalized,
+    )
+
+
+def _username_from_email(users: UserRepository, email: str) -> str:
+    base = re.sub(r"[^a-z0-9._-]", "", email.split("@", maxsplit=1)[0].lower())[:36] or "usuario"
+    if len(base) < 2:
+        base = f"{base}00"
+    candidate, n = base, 2
+    while users.find_by_username(candidate):
+        candidate = f"{base[:36]}{n}"
+        n += 1
+    return candidate
+
+
+def resolve_oidc_user(
+    users: UserRepository,
+    *,
+    subject: str,
+    email: str | None,
+    name: str | None,
+    email_verified: bool,
+    allowed_domains: tuple[str, ...],
+    auto_create_role: str | None,
+) -> dict[str, Any] | None:
+    """Usuario para una identidad del proveedor, o None si no tiene acceso.
+
+    1. Por el identificador del proveedor (`sub`), si ya entró antes.
+    2. Por el correo verificado de un usuario creado por un administrador: se vincula.
+    3. Si INVOICEBOT_OIDC_AUTO_CREATE_ROLE está definido, se crea con ese rol (nunca admin).
+    """
+    domain = (email or "").rsplit("@", 1)[-1]
+    if allowed_domains and (not email or domain not in allowed_domains):
+        return None
+    user = users.find_by_subject(subject)
+    if user is None and email and email_verified:
+        user = users.find_by_email(email)
+        if user is not None:
+            users.link_external(user["id"], subject=subject)
+    if user is None and auto_create_role and email and email_verified:
+        user_id = users.insert(
+            username=_username_from_email(users, email),
+            display_name=(name or email)[:100],
+            # Sin contraseña local: solo entra por el proveedor.
+            password_hash="!",
+            role=auto_create_role,
+            email=email,
+            auth_provider="oidc",
+            external_subject=subject,
+        )
+        user = users.find_by_username(users.get_by_id(user_id)["username"])  # type: ignore[index]
+    if user is None or not user["active"]:
+        return None
+    users.touch_login(user["id"])
+    return users.get_by_id(user["id"])

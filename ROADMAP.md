@@ -87,18 +87,18 @@ Cada actor es **idempotente**: recibe un identificador, no el documento, y vuelv
 
 **Hecho cuando**: las pruebas pasan con `inline` y con `redis`, y un lote de documentos se procesa en un worker real sin pérdidas ni duplicados (`tests/integration/test_jobs.py`).
 
-## Fase 1: Multiempresa, seguridad y auditoría
+## Fase 1: Multiempresa, seguridad y auditoría ✅
 
 **Objetivo**: que un estudio contable o un grupo de empresas use una sola instalación con permisos por función.
 
-- [ ] Tabla `companies` (RUC receptor, razón social, configuración tributaria: agente de retención, buen contribuyente) y `company_id` en todas las tablas. Cada comprobante se asigna automáticamente según el RUC del adquirente del XML o del PDF.
-- [ ] **Roles**: administrador, asistente contable (registra y corrige), aprobador, tesorería (solo aprobados) y auditor (solo lectura). Permisos por empresa.
-- [ ] **SSO OIDC** con Microsoft Entra ID y Google Workspace (el MFA lo pone el proveedor de identidad). Los usuarios locales se mantienen para instalaciones pequeñas.
-- [ ] **Auditoría**: tablas temporales de SQL Server (*system-versioned*) en `invoices`, configuración y usuarios, más el `review_actions` actual. Reporte "quién cambió qué y cuándo".
-- [ ] **Row-Level Security** de SQL Server por `company_id` como defensa en profundidad.
-- [ ] Claves de API por empresa con alcances finos (`documents:write`, `invoices:read`, `exports:read`) y rate limit por clave en Redis.
+- [x] Tabla `companies` (RUC adquirente, razón social, agente de retención, buen contribuyente) y `company_id` en `invoices`, asignado automáticamente por el RUC del adquirente. Si hay empresas y el adquirente no es ninguna: advertencia `CUSTOMER_NOT_A_COMPANY`.
+- [x] **Roles**: `admin`, `accountant` (contabilidad), `approver`, `treasury` y `auditor`, con un permiso por endpoint. Cada usuario puede limitarse a ciertas empresas.
+- [x] **SSO OIDC** con Microsoft Entra ID y Google Workspace (PKCE, JWKS, nonce, dominios permitidos y alta automática opcional). Los usuarios locales se mantienen.
+- [x] **Auditoría**: *cambio respecto del plan*: triggers (`invoice_changes`, `company_changes`) en vez de tablas temporales. Con `READ_COMMITTED_SNAPSHOT` y conexiones reutilizadas del pool, las tablas temporales rechazan modificaciones concurrentes (error 13535; reproducido en las pruebas). Cada cambio registra quién lo hizo: persona, clave de API o trabajo.
+- [x] **Row-Level Security** de SQL Server por `company_id` (filtro y bloqueo tras actualizar), fijada por petición con `SESSION_CONTEXT`.
+- [x] Claves de API por empresa y con permisos finos; el límite de llamadas por clave en Redis queda para la Fase 6.
 
-**Hecho cuando**: un usuario de la empresa A no puede ver ni por API ni por SQL un comprobante de la empresa B, y cada cambio de un comprobante aparece en el historial temporal.
+**Hecho cuando**: una persona de la empresa A no puede ver por la API un comprobante de la empresa B, y cada cambio de un comprobante aparece en el historial con su autor (`tests/integration/test_access.py`).
 
 ## Fase 2: Flujo de cuentas por pagar (match y aprobación)
 

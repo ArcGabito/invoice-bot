@@ -175,6 +175,26 @@ class RunConfig:
 
 
 @dataclass(frozen=True)
+class OidcConfig:
+    """Inicio de sesión con Microsoft Entra ID, Google Workspace u otro proveedor OIDC."""
+
+    issuer: str | None
+    client_id: str | None
+    client_secret_set: bool
+    scopes: str
+    #: Dominios de correo admitidos (vacío = cualquiera del proveedor).
+    allowed_domains: tuple[str, ...]
+    #: Rol de quien entra por primera vez sin usuario previo (None = solo usuarios creados).
+    auto_create_role: str | None
+    label: str
+    redirect_url: str | None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.issuer and self.client_id)
+
+
+@dataclass(frozen=True)
 class QueueConfig:
     #: inline: en el mismo proceso (Windows, pruebas) · redis: Dramatiq + Redis (VPS, Azure)
     backend: str
@@ -229,6 +249,7 @@ class Config:
     run: RunConfig
     queue: QueueConfig
     schedule: ScheduleConfig
+    oidc: OidcConfig
     timezone: str
     reviewer: str | None
     env: Mapping[str, str] = field(repr=False, compare=False, default_factory=dict)
@@ -437,6 +458,25 @@ def load_config(
 
     run_interval = r.integer("INVOICEBOT_RUN_INTERVAL_MINUTES", 15, 1, 24 * 60)
 
+    oidc_issuer = r.url("INVOICEBOT_OIDC_ISSUER")
+    if oidc_issuer and not oidc_issuer.startswith("https://"):
+        r.errors.append("INVOICEBOT_OIDC_ISSUER: debe ser https")
+    oidc_role = r.text("INVOICEBOT_OIDC_AUTO_CREATE_ROLE")
+    if oidc_role and oidc_role not in ("accountant", "approver", "treasury", "auditor"):
+        r.errors.append(
+            "INVOICEBOT_OIDC_AUTO_CREATE_ROLE: usa accountant | approver | treasury | auditor "
+            "(nunca admin)"
+        )
+    if oidc_issuer and not r.text("INVOICEBOT_OIDC_CLIENT_ID"):
+        r.errors.append("INVOICEBOT_OIDC_ISSUER requiere INVOICEBOT_OIDC_CLIENT_ID")
+    default_label = (
+        "Microsoft"
+        if "microsoftonline" in (oidc_issuer or "")
+        else "Google"
+        if "google" in (oidc_issuer or "")
+        else "inicio de sesión único"
+    )
+
     provider = str(
         overrides.get("ai_provider") or r.text("INVOICEBOT_AI_PROVIDER") or "anthropic"
     ).lower()
@@ -604,6 +644,21 @@ def load_config(
             backup=cron("INVOICEBOT_SCHEDULE_BACKUP", "0 2 * * *"),
             purge=cron("INVOICEBOT_SCHEDULE_PURGE", "30 3 * * *"),
             job_retention_days=r.integer("INVOICEBOT_JOB_RETENTION_DAYS", 30, 1, 3650),
+        ),
+        oidc=OidcConfig(
+            issuer=oidc_issuer.rstrip("/") if oidc_issuer else None,
+            client_id=r.text("INVOICEBOT_OIDC_CLIENT_ID"),
+            client_secret_set=r.is_set("INVOICEBOT_OIDC_CLIENT_SECRET"),
+            scopes=r.text("INVOICEBOT_OIDC_SCOPES", "openid email profile")
+            or "openid email profile",
+            allowed_domains=tuple(
+                d.strip().lower().lstrip("@")
+                for d in (r.text("INVOICEBOT_OIDC_ALLOWED_DOMAINS") or "").split(",")
+                if d.strip()
+            ),
+            auto_create_role=oidc_role,
+            label=r.text("INVOICEBOT_OIDC_LABEL", default_label) or default_label,
+            redirect_url=r.url("INVOICEBOT_OIDC_REDIRECT_URL"),
         ),
         timezone=timezone,
         reviewer=overrides.get("reviewer") or r.text("INVOICEBOT_USER"),

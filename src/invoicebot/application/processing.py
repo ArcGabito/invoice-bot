@@ -386,6 +386,17 @@ def process_document(deps: Deps, *, document: dict[str, Any], file_path: str) ->
                     "; ".join(f"#{m['document_id']} {m['file_name']}" for m in matches),
                 )
             )
+        company_id, has_companies = tx.company_for_customer(invoice.customer_ruc)
+        if has_companies and company_id is None:
+            all_issues.append(
+                NewIssue(
+                    "CUSTOMER_NOT_A_COMPANY",
+                    Severity.WARNING,
+                    "El comprobante no está dirigido a ninguna de las empresas registradas",
+                    None,
+                    invoice.customer_ruc or "sin RUC del adquirente",
+                )
+            )
         all_issues.extend(notes)
         status = status_from_issues(all_issues)
         invoice_id = tx.save_invoice_result(
@@ -398,6 +409,7 @@ def process_document(deps: Deps, *, document: dict[str, Any], file_path: str) ->
             data_source=data_source,
             issues=all_issues,
             exchange_rate=exchange_rate,
+            company_id=company_id,
         )
     log.info(
         "documento extraído", extra={"document_id": doc_id, "status": status, "source": data_source}

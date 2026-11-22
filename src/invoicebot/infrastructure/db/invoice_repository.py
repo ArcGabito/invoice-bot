@@ -315,10 +315,12 @@ class InvoiceRepository:
         data_source: str = DataSource.AI,
         issues: Sequence[NewIssue],
         exchange_rate: ExchangeRate | None = None,
+        company_id: int | None = None,
     ) -> int:
         """Guarda factura, incidencias y estado del documento. Reemplaza la factura anterior."""
         values = {
             **_invoice_values(invoice),
+            "company_id": company_id,
             "exchange_rate": exchange_rate.rate if exchange_rate else None,
             "exchange_rate_date": storable_date(exchange_rate.date) if exchange_rate else None,
             "document_id": document_id,
@@ -328,7 +330,7 @@ class InvoiceRepository:
             "validation_status": validation_status,
             "rules_version": rules_version,
         }
-        data_columns = [*INVOICE_COLUMNS, "exchange_rate", "exchange_rate_date"]
+        data_columns = [*INVOICE_COLUMNS, "exchange_rate", "exchange_rate_date", "company_id"]
         with self.transaction() as repo, repo._c() as conn:
             existing = conn.execute(
                 text("SELECT id FROM invoices WHERE document_id = :d"), {"d": document_id}
@@ -363,9 +365,11 @@ class InvoiceRepository:
                 ]
                 invoice_id = int(
                     conn.execute(
+                        # `invoices` tiene un trigger de auditoría: OUTPUT necesita INTO.
                         text(
-                            f"INSERT INTO invoices ({', '.join(columns)}) OUTPUT inserted.id "
-                            f"VALUES ({', '.join(':' + c for c in columns)})"
+                            "SET NOCOUNT ON; DECLARE @ids TABLE (id INT); "
+                            f"INSERT INTO invoices ({', '.join(columns)}) OUTPUT inserted.id INTO @ids "
+                            f"VALUES ({', '.join(':' + c for c in columns)}); SELECT id FROM @ids"
                         ),
                         values,
                     ).scalar_one()
@@ -379,6 +383,33 @@ class InvoiceRepository:
                 error_message=None,
             )
         return invoice_id
+
+    def company_for_customer(self, customer_ruc: str | None) -> tuple[int | None, bool]:
+        """(empresa activa con ese RUC, ¿hay empresas registradas?)."""
+        row = self._one(
+            """SELECT (SELECT TOP (1) id FROM companies WHERE ruc = :r AND active = 1) AS id,
+                      (SELECT COUNT(*) FROM companies WHERE active = 1) AS n""",
+            {"r": customer_ruc or ""},
+        )
+        if row is None:
+            return None, False
+        return (int(row["id"]) if row["id"] is not None else None), int(row["n"] or 0) > 0
+
+    def invoice_history(self, invoice_id: int) -> list[Row]:
+        """Cada estado de la factura (trigger de auditoría): qué cambió, cuándo y quién.
+
+        Respeta la Row-Level Security: solo se muestra si la factura es visible.
+        """
+        return self._all(
+            """SELECT c.id, c.operation, c.changed_at, c.changed_by, c.validation_status,
+                      c.review_status, c.reviewed_by, c.supplier_ruc, c.document_type, c.series,
+                      c.number, c.issue_date, c.currency, c.total_cents, c.igv_cents,
+                      c.sunat_status, c.company_id, c.corrected
+               FROM invoice_changes c
+               WHERE c.invoice_id = :id AND EXISTS (SELECT 1 FROM invoices i WHERE i.id = :id)
+               ORDER BY c.id""",
+            {"id": invoice_id},
+        )
 
     def insert_issues(self, invoice_id: int, issues: Sequence[NewIssue]) -> None:
         if not issues:
