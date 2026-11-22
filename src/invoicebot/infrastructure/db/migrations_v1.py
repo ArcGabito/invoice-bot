@@ -224,4 +224,221 @@ M007 = Migration(
     ),
 )
 
-V1_MIGRATIONS = (M005, M006, M007)
+_NOW = "CONSTRAINT df_{0}_created DEFAULT SYSUTCDATETIME()"
+
+#: Cuentas por pagar: órdenes de compra, recepciones, match a 2 y 3 vías, matriz de
+#: aprobación con delegaciones, cuenta contable aprendida por proveedor, notas de crédito
+#: aplicadas y eventos de integración (outbox + webhooks firmados).
+M008 = Migration(
+    8,
+    "008_purchasing_approvals_events",
+    (
+        """ALTER TABLE invoices ADD
+      -- not_required | pending | approved | rejected (autorización de pago)
+      approval_status       NVARCHAR(12) NULL,
+      account_code          NVARCHAR(20) NULL,
+      cost_center           NVARCHAR(30) NULL,
+      -- history (aprendida) | order (de la orden de compra) | manual
+      accounting_source     NVARCHAR(12) NULL,
+      -- Notas de crédito y débito: la factura a la que se aplican.
+      applied_to_invoice_id INT NULL""",
+        "CREATE INDEX ix_invoices_approval ON invoices (approval_status) WHERE approval_status IS NOT NULL",
+        "CREATE INDEX ix_invoices_applied ON invoices (applied_to_invoice_id) WHERE applied_to_invoice_id IS NOT NULL",
+        f"""CREATE TABLE purchase_orders (
+      id               INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_purchase_orders PRIMARY KEY,
+      company_id       INT NULL CONSTRAINT fk_purchase_orders_company REFERENCES companies (id),
+      company_key      AS ISNULL(company_id, 0) PERSISTED,
+      po_number        NVARCHAR(40)  NOT NULL,
+      supplier_ruc     NVARCHAR(11)  NOT NULL,
+      supplier_name    NVARCHAR(300) NULL,
+      currency         NVARCHAR(3)   NOT NULL CONSTRAINT df_purchase_orders_currency DEFAULT N'PEN',
+      issue_date       DATE          NULL,
+      total_cents      BIGINT        NOT NULL CONSTRAINT df_purchase_orders_total DEFAULT 0,
+      status           NVARCHAR(20)  NOT NULL CONSTRAINT df_purchase_orders_status DEFAULT N'open'
+        CONSTRAINT ck_purchase_orders_status CHECK (status IN (N'open', N'closed', N'cancelled')),
+      requires_receipt BIT           NOT NULL CONSTRAINT df_purchase_orders_receipt DEFAULT 1,
+      cost_center      NVARCHAR(30)  NULL,
+      requester        NVARCHAR(150) NULL,
+      source           NVARCHAR(20)  NOT NULL CONSTRAINT df_purchase_orders_source DEFAULT N'api',
+      created_at       DATETIME2(3)  NOT NULL {_NOW.format("purchase_orders")},
+      updated_at       DATETIME2(3)  NOT NULL CONSTRAINT df_purchase_orders_updated DEFAULT SYSUTCDATETIME(),
+      CONSTRAINT uq_purchase_orders_number UNIQUE (company_key, po_number)
+    )""",
+        "CREATE INDEX ix_purchase_orders_supplier ON purchase_orders (supplier_ruc, status)",
+        """CREATE TABLE purchase_order_lines (
+      id               INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_purchase_order_lines PRIMARY KEY,
+      order_id         INT NOT NULL CONSTRAINT fk_po_lines_order REFERENCES purchase_orders (id) ON DELETE CASCADE,
+      line_no          INT NOT NULL,
+      item_code        NVARCHAR(60)   NULL,
+      description      NVARCHAR(300)  NULL,
+      quantity         DECIMAL(18, 4) NOT NULL,
+      unit_price_cents BIGINT         NOT NULL,
+      CONSTRAINT uq_po_lines UNIQUE (order_id, line_no)
+    )""",
+        f"""CREATE TABLE goods_receipts (
+      id                 INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_goods_receipts PRIMARY KEY,
+      company_id         INT NULL CONSTRAINT fk_goods_receipts_company REFERENCES companies (id),
+      company_key        AS ISNULL(company_id, 0) PERSISTED,
+      order_id           INT NULL CONSTRAINT fk_goods_receipts_order REFERENCES purchase_orders (id),
+      receipt_number     NVARCHAR(40) NOT NULL,
+      supplier_ruc       NVARCHAR(11) NOT NULL,
+      receipt_date       DATE         NULL,
+      despatch_reference NVARCHAR(40) NULL,
+      amount_cents       BIGINT       NULL,
+      source             NVARCHAR(20) NOT NULL CONSTRAINT df_goods_receipts_source DEFAULT N'api',
+      created_at         DATETIME2(3) NOT NULL {_NOW.format("goods_receipts")},
+      CONSTRAINT uq_goods_receipts UNIQUE (company_key, supplier_ruc, receipt_number)
+    )""",
+        "CREATE INDEX ix_goods_receipts_order ON goods_receipts (order_id)",
+        "CREATE INDEX ix_goods_receipts_despatch ON goods_receipts (supplier_ruc, despatch_reference) WHERE despatch_reference IS NOT NULL",
+        """CREATE TABLE goods_receipt_lines (
+      id            INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_goods_receipt_lines PRIMARY KEY,
+      receipt_id    INT NOT NULL CONSTRAINT fk_gr_lines_receipt REFERENCES goods_receipts (id) ON DELETE CASCADE,
+      order_line_id INT NULL CONSTRAINT fk_gr_lines_po_line REFERENCES purchase_order_lines (id),
+      item_code     NVARCHAR(60)   NULL,
+      quantity      DECIMAL(18, 4) NOT NULL
+    )""",
+        """CREATE TABLE invoice_matches (
+      invoice_id    INT NOT NULL CONSTRAINT pk_invoice_matches PRIMARY KEY
+                    CONSTRAINT fk_invoice_matches_invoice REFERENCES invoices (id) ON DELETE CASCADE,
+      order_id      INT NULL CONSTRAINT fk_invoice_matches_order REFERENCES purchase_orders (id),
+      status        NVARCHAR(12)  NOT NULL CONSTRAINT ck_invoice_matches_status
+        CHECK (status IN (N'matched', N'exception', N'no_order')),
+      match_type    NVARCHAR(10)  NULL,
+      found_by      NVARCHAR(20)  NULL,
+      matched_cents BIGINT        NULL,
+      exceptions    NVARCHAR(MAX) NULL,
+      checked_at    DATETIME2(3)  NOT NULL CONSTRAINT df_invoice_matches_checked DEFAULT SYSUTCDATETIME()
+    )""",
+        "CREATE INDEX ix_invoice_matches_order ON invoice_matches (order_id) WHERE order_id IS NOT NULL",
+        f"""CREATE TABLE approval_rules (
+      id               INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_approval_rules PRIMARY KEY,
+      company_id       INT NULL CONSTRAINT fk_approval_rules_company REFERENCES companies (id),
+      cost_center      NVARCHAR(30) NULL,
+      supplier_ruc     NVARCHAR(11) NULL,
+      min_amount_cents BIGINT       NOT NULL CONSTRAINT df_approval_rules_min DEFAULT 0,
+      max_amount_cents BIGINT       NULL,
+      level            INT          NOT NULL CONSTRAINT df_approval_rules_level DEFAULT 1,
+      approver         NVARCHAR(40) NULL,
+      sla_hours        INT          NOT NULL CONSTRAINT df_approval_rules_sla DEFAULT 48,
+      escalate_to      NVARCHAR(40) NULL,
+      active           BIT          NOT NULL CONSTRAINT df_approval_rules_active DEFAULT 1,
+      created_at       DATETIME2(3) NOT NULL {_NOW.format("approval_rules")}
+    )""",
+        f"""CREATE TABLE approval_requests (
+      id               INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_approval_requests PRIMARY KEY,
+      invoice_id       INT NOT NULL CONSTRAINT fk_approval_requests_invoice REFERENCES invoices (id) ON DELETE CASCADE,
+      level            INT           NOT NULL,
+      rule_id          INT           NULL,
+      approver         NVARCHAR(40)  NOT NULL,
+      status           NVARCHAR(12)  NOT NULL CONSTRAINT df_approval_requests_status DEFAULT N'pending'
+        CONSTRAINT ck_approval_requests_status
+        CHECK (status IN (N'pending', N'approved', N'rejected', N'escalated', N'cancelled')),
+      due_at           DATETIME2(3)  NOT NULL,
+      escalate_to      NVARCHAR(40)  NULL,
+      reminders_sent   INT           NOT NULL CONSTRAINT df_approval_requests_reminders DEFAULT 0,
+      last_reminder_at DATETIME2(3)  NULL,
+      decided_at       DATETIME2(3)  NULL,
+      decided_by       NVARCHAR(150) NULL,
+      comment          NVARCHAR(1000) NULL,
+      token_hash       BINARY(32)    NULL,
+      token_expires_at DATETIME2(3)  NULL,
+      created_at       DATETIME2(3)  NOT NULL {_NOW.format("approval_requests")}
+    )""",
+        "CREATE INDEX ix_approval_requests_pending ON approval_requests (status, due_at) INCLUDE (approver)",
+        "CREATE INDEX ix_approval_requests_invoice ON approval_requests (invoice_id, level)",
+        "CREATE UNIQUE INDEX uq_approval_requests_token ON approval_requests (token_hash) WHERE token_hash IS NOT NULL",
+        f"""CREATE TABLE approval_delegations (
+      id         INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_approval_delegations PRIMARY KEY,
+      username   NVARCHAR(40)  NOT NULL,
+      delegate   NVARCHAR(40)  NOT NULL,
+      starts_on  DATE          NOT NULL,
+      ends_on    DATE          NOT NULL,
+      reason     NVARCHAR(300) NULL,
+      created_at DATETIME2(3)  NOT NULL {_NOW.format("approval_delegations")},
+      CONSTRAINT ck_approval_delegations_dates CHECK (ends_on >= starts_on)
+    )""",
+        """CREATE TABLE supplier_accounting (
+      id           INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_supplier_accounting PRIMARY KEY,
+      company_key  INT          NOT NULL CONSTRAINT df_supplier_accounting_company DEFAULT 0,
+      supplier_ruc NVARCHAR(11) NOT NULL,
+      account_code NVARCHAR(20) NULL,
+      cost_center  NVARCHAR(30) NULL,
+      uses         INT          NOT NULL CONSTRAINT df_supplier_accounting_uses DEFAULT 1,
+      last_used_at DATETIME2(3) NOT NULL CONSTRAINT df_supplier_accounting_used DEFAULT SYSUTCDATETIME()
+    )""",
+        "CREATE INDEX ix_supplier_accounting ON supplier_accounting (company_key, supplier_ruc)",
+        f"""CREATE TABLE webhooks (
+      id         INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_webhooks PRIMARY KEY,
+      name       NVARCHAR(100) NOT NULL,
+      url        NVARCHAR(500) NOT NULL,
+      secret     NVARCHAR(100) NOT NULL,
+      events     NVARCHAR(500) NOT NULL CONSTRAINT df_webhooks_events DEFAULT N'*',
+      company_id INT NULL CONSTRAINT fk_webhooks_company REFERENCES companies (id),
+      active     BIT           NOT NULL CONSTRAINT df_webhooks_active DEFAULT 1,
+      created_at DATETIME2(3)  NOT NULL {_NOW.format("webhooks")}
+    )""",
+        f"""CREATE TABLE outbox_events (
+      id         BIGINT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_outbox_events PRIMARY KEY,
+      event_id   NVARCHAR(36)  NOT NULL CONSTRAINT uq_outbox_events_event UNIQUE,
+      type       NVARCHAR(80)  NOT NULL,
+      subject    NVARCHAR(100) NULL,
+      company_id INT           NULL,
+      data       NVARCHAR(MAX) NOT NULL,
+      created_at DATETIME2(3)  NOT NULL {_NOW.format("outbox_events")}
+    )""",
+        "CREATE INDEX ix_outbox_events_type ON outbox_events (type, id DESC)",
+        f"""CREATE TABLE webhook_deliveries (
+      id               BIGINT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_webhook_deliveries PRIMARY KEY,
+      event_id         BIGINT NOT NULL CONSTRAINT fk_deliveries_event REFERENCES outbox_events (id) ON DELETE CASCADE,
+      webhook_id       INT    NOT NULL CONSTRAINT fk_deliveries_webhook REFERENCES webhooks (id) ON DELETE CASCADE,
+      status           NVARCHAR(12)   NOT NULL CONSTRAINT df_deliveries_status DEFAULT N'pending'
+        CONSTRAINT ck_deliveries_status CHECK (status IN (N'pending', N'delivered', N'failed')),
+      attempts         INT            NOT NULL CONSTRAINT df_deliveries_attempts DEFAULT 0,
+      last_status_code INT            NULL,
+      last_error       NVARCHAR(1000) NULL,
+      delivered_at     DATETIME2(3)   NULL,
+      created_at       DATETIME2(3)   NOT NULL {_NOW.format("webhook_deliveries")}
+    )""",
+        "CREATE INDEX ix_webhook_deliveries_pending ON webhook_deliveries (status, id) WHERE status = N'pending'",
+        # La auditoría registra también la autorización de pago y la cuenta contable.
+        "ALTER TABLE invoice_changes ADD approval_status NVARCHAR(12) NULL, account_code NVARCHAR(20) NULL, cost_center NVARCHAR(30) NULL",
+        """CREATE OR ALTER TRIGGER trg_invoices_audit ON invoices AFTER INSERT, UPDATE, DELETE AS
+    BEGIN
+      SET NOCOUNT ON;
+      INSERT INTO invoice_changes (invoice_id, operation, changed_by, company_id, supplier_ruc,
+        document_type, series, number, issue_date, currency, igv_cents, total_cents,
+        validation_status, review_status, reviewed_by, sunat_status, corrected,
+        approval_status, account_code, cost_center)
+      SELECT COALESCE(i.id, d.id),
+        CASE WHEN d.id IS NULL THEN N'I' WHEN i.id IS NULL THEN N'D' ELSE N'U' END,
+        COALESCE(CAST(SESSION_CONTEXT(N'invoicebot.actor') AS NVARCHAR(150)), ORIGINAL_LOGIN()),
+        COALESCE(i.company_id, d.company_id), COALESCE(i.supplier_ruc, d.supplier_ruc),
+        COALESCE(i.document_type, d.document_type), COALESCE(i.series, d.series),
+        COALESCE(i.number, d.number), COALESCE(i.issue_date, d.issue_date),
+        COALESCE(i.currency, d.currency), COALESCE(i.igv_cents, d.igv_cents),
+        COALESCE(i.total_cents, d.total_cents),
+        COALESCE(i.validation_status, d.validation_status),
+        COALESCE(i.review_status, d.review_status), COALESCE(i.reviewed_by, d.reviewed_by),
+        COALESCE(i.sunat_status, d.sunat_status), COALESCE(i.corrected, d.corrected),
+        COALESCE(i.approval_status, d.approval_status), COALESCE(i.account_code, d.account_code),
+        COALESCE(i.cost_center, d.cost_center)
+      FROM inserted i FULL OUTER JOIN deleted d ON d.id = i.id;
+    END""",
+        # Saldo de cada factura después de sus notas de crédito (07) y débito (08).
+        """CREATE VIEW v_invoice_balances AS
+    SELECT i.id AS invoice_id, i.company_id, i.supplier_ruc, i.series, i.number, i.currency,
+      i.total_cents,
+      COALESCE(SUM(CASE WHEN n.document_type = N'07' THEN n.total_cents END), 0) AS credit_cents,
+      COALESCE(SUM(CASE WHEN n.document_type = N'08' THEN n.total_cents END), 0) AS debit_cents,
+      i.total_cents
+        - COALESCE(SUM(CASE WHEN n.document_type = N'07' THEN n.total_cents END), 0)
+        + COALESCE(SUM(CASE WHEN n.document_type = N'08' THEN n.total_cents END), 0) AS balance_cents
+    FROM invoices i
+    LEFT JOIN invoices n ON n.applied_to_invoice_id = i.id AND n.review_status <> N'rejected'
+    WHERE i.document_type NOT IN (N'07', N'08')
+    GROUP BY i.id, i.company_id, i.supplier_ruc, i.series, i.number, i.currency, i.total_cents""",
+    ),
+)
+
+V1_MIGRATIONS = (M005, M006, M007, M008)

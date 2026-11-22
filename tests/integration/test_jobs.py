@@ -284,7 +284,7 @@ def test_redis_worker_processes_queue_end_to_end(tmp_path: Path, db_env, clean_d
             target=run_worker,
             kwargs={
                 "queue": queue,
-                "queues": ["ingest", "extract"],
+                "queues": ["ingest", "extract", "default"],
                 "threads": 2,
                 "logger": logging.getLogger("invoicebot.tests"),
                 "stop_event": stop,
@@ -295,11 +295,12 @@ def test_redis_worker_processes_queue_end_to_end(tmp_path: Path, db_env, clean_d
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
             jobs = ctx.job_repository.list_jobs(limit=50)
-            if len(jobs) == 5 and all(j["status"] == "succeeded" for j in jobs):
+            # escaneo + 4 documentos + 4 match con órdenes de compra
+            if len(jobs) == 9 and all(j["status"] == "succeeded" for j in jobs):
                 break
             time.sleep(0.5)
         jobs = ctx.job_repository.list_jobs(limit=50)
-        assert len(jobs) == 5 and {j["status"] for j in jobs} == {"succeeded"}, jobs
+        assert len(jobs) == 9 and {j["status"] for j in jobs} == {"succeeded"}, jobs
         assert _invoices(ctx) == 4
         assert {j["worker"].split(":")[0] for j in jobs} == {os.uname().nodename}
         assert sum(v["ready"] for v in queue.sizes().values()) == 0

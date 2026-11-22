@@ -100,19 +100,21 @@ Cada actor es **idempotente**: recibe un identificador, no el documento, y vuelv
 
 **Hecho cuando**: una persona de la empresa A no puede ver por la API un comprobante de la empresa B, y cada cambio de un comprobante aparece en el historial con su autor (`tests/integration/test_access.py`).
 
-## Fase 2: Flujo de cuentas por pagar (match y aprobación)
+## Fase 2: Flujo de cuentas por pagar (match y aprobación) ✅
 
 **Objetivo**: que una factura correcta llegue a "aprobada para pago" sin que nadie la toque, y que solo las excepciones lleguen a una persona.
 
-- [ ] Importación de **órdenes de compra** y **recepciones** (notas de ingreso, guías de remisión) desde el ERP por API o CSV. Las guías electrónicas también pueden llegar desde **document-bot**.
-- [ ] **Match a 2 y 3 vías** (OC ↔ factura ↔ recepción) con tolerancias configurables de precio, cantidad e importe, y motivo de cada excepción.
-- [ ] **Matriz de aprobación** por empresa, centro de costo, proveedor y monto (por ejemplo, hasta S/ 5 000 aprueba el jefe de área y desde ahí gerencia). Permite delegación por vacaciones.
-- [ ] Aprobación con un clic desde el correo (enlace firmado de un solo uso, enviado por **email-bot**) o desde la pantalla.
-- [ ] Recordatorios y **escalamiento por SLA** (actor `approvals.remind`, programado).
-- [ ] **Sugerencia de cuenta contable y centro de costo** por proveedor, aprendida de las correcciones anteriores. La IA solo propone cuando no hay historial.
-- [ ] Notas de crédito y débito aplicadas a su comprobante de referencia, con saldo pendiente recalculado.
+- [x] **Órdenes de compra y recepciones** (notas de ingreso, guías de remisión, conformidades) por API o CSV. Las guías de document-bot entran por la misma API.
+- [x] **Match a 2 y 3 vías** con tolerancias configurables y una excepción legible por cada diferencia. La orden se encuentra por la referencia del XML, por la guía o por proveedor e importe.
+- [x] **Matriz de aprobación** por empresa, centro de costo, proveedor y monto en soles, por niveles, con delegaciones por vacaciones.
+- [x] Aprobación con un clic desde el correo (enlace firmado de un solo uso, evento `approval.requested` para email-bot) o desde la API y la CLI.
+- [x] Recordatorios y **escalamiento por SLA** (`approvals.remind`, programado).
+- [x] **Cuenta contable y centro de costo**: de la orden y aprendidos de las correcciones por proveedor. *Pendiente*: la propuesta con IA cuando no hay historial.
+- [x] Notas de crédito y débito aplicadas a su comprobante, con el saldo en `v_invoice_balances`.
+- [x] *Adelantado de la Fase 4*: eventos con outbox y **webhooks firmados** (HMAC-SHA256, CloudEvents, reintentos).
+- [x] El código nuevo usa **SQLAlchemy ORM** (modelos declarativos 2.0), como pidió el equipo.
 
-**Hecho cuando**: con datos reales de un mes, el porcentaje de facturas aprobadas sin intervención humana (STP) se mide y supera la línea base, y cada excepción tiene un motivo legible.
+**Hecho cuando**: una factura que coincide con su orden y su recepción queda autorizada para pago sin intervención humana, y cada excepción tiene su motivo (`tests/integration/test_purchasing.py`).
 
 ## Fase 3: Cumplimiento tributario (SUNAT)
 

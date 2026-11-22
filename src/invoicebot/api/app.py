@@ -43,7 +43,7 @@ from invoicebot.api.security import (
     principal_dependency,
     require,
 )
-from invoicebot.application import review
+from invoicebot.application import approvals, events, integrations, purchasing, review
 from invoicebot.application.companies import add_company
 from invoicebot.application.exchange_rates import save_exchange_rates
 from invoicebot.application.reports import build_export, check_month, find_duplicates
@@ -164,6 +164,86 @@ class CompanyBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     retention_agent: bool = False
     good_taxpayer: bool = False
+
+
+class OrderLineBody(BaseModel):
+    line_no: int | None = Field(default=None, ge=1)
+    item_code: str | None = Field(default=None, max_length=60)
+    description: str | None = Field(default=None, max_length=300)
+    quantity: Decimal = Field(gt=0)
+    unit_price: Decimal = Field(ge=0, description="Precio unitario sin IGV")
+
+
+class PurchaseOrderBody(BaseModel):
+    po_number: str = Field(min_length=1, max_length=40)
+    supplier_ruc: str = Field(pattern=r"^\d{11}$")
+    supplier_name: str | None = Field(default=None, max_length=300)
+    company_ruc: str | None = Field(default=None, pattern=r"^\d{11}$")
+    currency: str = Field(default="PEN", pattern=r"^[A-Z]{3}$")
+    issue_date: str | None = None
+    cost_center: str | None = Field(default=None, max_length=30)
+    requester: str | None = Field(default=None, max_length=150)
+    requires_receipt: bool = True
+    status: str = Field(default="open", pattern="^(open|closed|cancelled)$")
+    lines: list[OrderLineBody] = Field(min_length=1, max_length=500)
+
+
+class ReceiptLineBody(BaseModel):
+    line_no: int = Field(ge=1, description="Línea de la orden de compra")
+    quantity: Decimal = Field(gt=0)
+
+
+class GoodsReceiptBody(BaseModel):
+    receipt_number: str = Field(min_length=1, max_length=40)
+    supplier_ruc: str = Field(pattern=r"^\d{11}$")
+    company_ruc: str | None = Field(default=None, pattern=r"^\d{11}$")
+    po_number: str | None = Field(default=None, max_length=40)
+    receipt_date: str | None = None
+    despatch_reference: str | None = Field(default=None, max_length=40)
+    amount: Decimal | None = Field(default=None, ge=0, description="Valor sin IGV (sin líneas)")
+    lines: list[ReceiptLineBody] = Field(default_factory=list, max_length=500)
+
+
+class MatchBody(BaseModel):
+    po_number: str | None = Field(default=None, max_length=40)
+
+
+class AccountingBody(BaseModel):
+    account_code: str | None = Field(default=None, max_length=20)
+    cost_center: str | None = Field(default=None, max_length=30)
+
+
+class DecisionBody(BaseModel):
+    comment: str | None = Field(default=None, max_length=1000)
+
+
+class ApprovalRuleBody(BaseModel):
+    level: int = Field(default=1, ge=1, le=9)
+    approver: str | None = Field(default=None, max_length=40)
+    company_ruc: str | None = Field(default=None, pattern=r"^\d{11}$")
+    cost_center: str | None = Field(default=None, max_length=30)
+    supplier_ruc: str | None = Field(default=None, pattern=r"^\d{11}$")
+    min_amount: Decimal = Field(default=Decimal(0), ge=0, description="En soles")
+    max_amount: Decimal | None = Field(default=None, gt=0, description="En soles (exclusivo)")
+    sla_hours: int = Field(default=48, ge=1, le=24 * 30)
+    escalate_to: str | None = Field(default=None, max_length=40)
+
+
+class DelegationBody(BaseModel):
+    username: str | None = Field(
+        default=None, max_length=40, description="Solo un admin delega por otro"
+    )
+    delegate: str = Field(max_length=40)
+    starts_on: date
+    ends_on: date
+    reason: str | None = Field(default=None, max_length=300)
+
+
+class WebhookBody(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    url: str = Field(pattern=r"^https?://", max_length=500)
+    events: str = Field(default="*", max_length=500)
+    company_ruc: str | None = Field(default=None, pattern=r"^\d{11}$")
 
 
 class JobBody(BaseModel):
@@ -643,13 +723,15 @@ def create_app(context: AppContext | None = None) -> FastAPI:
 
     @app.post("/api/v1/invoices/{invoice_id}/approve", tags=["revisión"])
     def approve(invoice_id: int, body: NoteBody, principal: Reviewer) -> dict[str, Any]:
-        return review.approve_invoice(
+        result = review.approve_invoice(
             ctx.review_deps(),
             invoice_id,
             user=principal.signature,
             note=body.note,
             force=body.force,
         )
+        ctx.after_review_approved(int(result["invoice_id"]))
+        return result
 
     @app.post("/api/v1/invoices/{invoice_id}/reject", tags=["revisión"])
     def reject(invoice_id: int, body: RejectBody, principal: Reviewer) -> dict[str, Any]:
@@ -858,6 +940,226 @@ def create_app(context: AppContext | None = None) -> FastAPI:
         thread.start()
         ctx.logger.info("ciclo lanzado desde la API", extra={"by": principal.signature})
         return {"status": "started"}
+
+    # --- Compras: órdenes, recepciones, match y datos contables ------------------------
+
+    Purchasing = Annotated[Principal, Depends(need(access.PURCHASING_WRITE))]
+    Approver = Annotated[Principal, Depends(need(access.APPROVALS_WRITE))]
+
+    @app.post("/api/v1/purchase-orders", tags=["compras"], status_code=201)
+    def save_purchase_order(body: PurchaseOrderBody, _: Purchasing) -> dict[str, Any]:
+        """Crea o reemplaza una orden de compra (desde el ERP). Importes sin IGV."""
+        result = purchasing.upsert_purchase_order(ctx, body.model_dump(mode="json"), source="api")
+        return result
+
+    @app.get("/api/v1/purchase-orders", tags=["compras"])
+    def list_purchase_orders(
+        principal: Reader,
+        supplier_ruc: str | None = None,
+        status: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        items = purchasing.list_orders(
+            ctx,
+            company_ids=principal.company_ids,
+            supplier_ruc=supplier_ruc,
+            status=status,
+            limit=limit,
+        )
+        return {"items": items}
+
+    @app.get("/api/v1/purchase-orders/{order_id}", tags=["compras"])
+    def purchase_order_detail(order_id: int, principal: Reader) -> dict[str, Any]:
+        order = purchasing.get_order(ctx, order_id, company_ids=principal.company_ids)
+        if order is None:
+            raise HTTPException(404, "No existe la orden de compra")
+        return order
+
+    @app.post("/api/v1/goods-receipts", tags=["compras"], status_code=201)
+    def save_goods_receipt(body: GoodsReceiptBody, _: Purchasing) -> dict[str, Any]:
+        """Nota de ingreso, guía de remisión o conformidad de servicio (también desde document-bot)."""
+        result = purchasing.record_goods_receipt(ctx, body.model_dump(mode="json"), source="api")
+        # Las facturas de esa orden que esperaban la recepción se vuelven a evaluar.
+        if result["order_id"]:
+            for match in purchasing.invoices_waiting(ctx, int(result["order_id"])):
+                ctx.jobs.enqueue(
+                    "purchasing.match", {"invoice_id": match}, dedupe_key=f"match:{match}"
+                )
+        return result
+
+    @app.get("/api/v1/invoices/{invoice_id}/match", tags=["compras"])
+    def invoice_match(invoice_id: int, _: Reader) -> dict[str, Any]:
+        match = purchasing.get_match(ctx, invoice_id)
+        if match is None:
+            raise HTTPException(404, "La factura no tiene match todavía")
+        return match
+
+    @app.post("/api/v1/invoices/{invoice_id}/match", tags=["compras"])
+    def rematch_invoice(invoice_id: int, body: MatchBody, _: Purchasing) -> dict[str, Any]:
+        """Vuelve a hacer el match; con `po_number` vincula la factura a esa orden a mano."""
+        if ctx.repository.get_invoice_detail(invoice_id) is None:
+            raise HTTPException(404, "No existe la factura")
+        return purchasing.run_match(ctx, invoice_id, po_number=body.po_number)
+
+    @app.patch("/api/v1/invoices/{invoice_id}/accounting", tags=["compras"])
+    def invoice_accounting(invoice_id: int, body: AccountingBody, _: Reviewer) -> dict[str, Any]:
+        """Cuenta contable y centro de costo; se aprenden para el proveedor."""
+        return purchasing.set_accounting(
+            ctx, invoice_id, account_code=body.account_code, cost_center=body.cost_center
+        )
+
+    # --- Aprobación de pago ------------------------------------------------------------------
+
+    @app.get("/api/v1/approvals", tags=["aprobaciones"])
+    def list_approvals(
+        principal: Reader,
+        status: str | None = "pending",
+        mine: bool = False,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        return {
+            "items": approvals.list_requests(
+                ctx, status=status or None, approver=principal.name if mine else None, limit=limit
+            )
+        }
+
+    @app.post("/api/v1/approvals/{approval_id}/approve", tags=["aprobaciones"])
+    def approve_payment(
+        approval_id: int, body: DecisionBody, principal: Approver
+    ) -> dict[str, Any]:
+        return approvals.decide(
+            ctx,
+            approval_id,
+            approve=True,
+            user=principal.name,
+            comment=body.comment,
+            is_admin=principal.can(access.ADMIN),
+        )
+
+    @app.post("/api/v1/approvals/{approval_id}/reject", tags=["aprobaciones"])
+    def reject_payment(approval_id: int, body: DecisionBody, principal: Approver) -> dict[str, Any]:
+        return approvals.decide(
+            ctx,
+            approval_id,
+            approve=False,
+            user=principal.name,
+            comment=body.comment,
+            is_admin=principal.can(access.ADMIN),
+        )
+
+    @app.get("/approve/{token}", include_in_schema=False, response_class=HTMLResponse)
+    def approval_page(request: Request, token: str) -> Response:
+        """Página del enlace de un clic (llega por correo): muestra la factura y pide confirmar."""
+        item = approvals.by_token(ctx, token)
+        return templates.TemplateResponse(
+            request,
+            "approve.html",
+            {"item": item, "token": token, "done": None, "version": __version__},
+            status_code=200 if item else 410,
+        )
+
+    @app.post("/approve/{token}", include_in_schema=False, response_class=HTMLResponse)
+    def approval_decision(
+        request: Request,
+        token: str,
+        decision: Annotated[str, Form(pattern="^(approve|reject)$")],
+        comment: Annotated[str | None, Form(max_length=1000)] = None,
+    ) -> Response:
+        try:
+            result = approvals.decide_by_token(
+                ctx, token, approve=decision == "approve", comment=comment
+            )
+        except ReviewError as error:
+            return templates.TemplateResponse(
+                request,
+                "approve.html",
+                {
+                    "item": None,
+                    "token": token,
+                    "done": None,
+                    "error": error.message,
+                    "version": __version__,
+                },
+                status_code=400,
+            )
+        return templates.TemplateResponse(
+            request,
+            "approve.html",
+            {"item": None, "token": token, "done": result, "version": __version__},
+        )
+
+    @app.get("/api/v1/approval-rules", tags=["aprobaciones"])
+    def list_approval_rules(_: Reader) -> dict[str, Any]:
+        return {"items": approvals.list_rules(ctx)}
+
+    @app.post("/api/v1/approval-rules", tags=["aprobaciones"], status_code=201)
+    def create_approval_rule(body: ApprovalRuleBody, _: Admin) -> dict[str, Any]:
+        from invoicebot.application.companies import require_company
+
+        company_id = (
+            int(require_company(ctx.companies, body.company_ruc)["id"])
+            if body.company_ruc
+            else None
+        )
+        return approvals.add_rule(
+            ctx,
+            level=body.level,
+            approver=body.approver,
+            company_id=company_id,
+            cost_center=body.cost_center,
+            supplier_ruc=body.supplier_ruc,
+            min_amount_cents=round(body.min_amount * 100),
+            max_amount_cents=round(body.max_amount * 100) if body.max_amount is not None else None,
+            sla_hours=body.sla_hours,
+            escalate_to=body.escalate_to,
+        )
+
+    @app.delete("/api/v1/approval-rules/{rule_id}", tags=["aprobaciones"])
+    def delete_approval_rule(rule_id: int, _: Admin) -> dict[str, Any]:
+        if not approvals.disable_rule(ctx, rule_id):
+            raise HTTPException(404, "No existe la regla")
+        return {"id": rule_id, "active": False}
+
+    @app.post("/api/v1/approval-delegations", tags=["aprobaciones"], status_code=201)
+    def create_delegation(body: DelegationBody, principal: Approver) -> dict[str, Any]:
+        owner = body.username or principal.name
+        if owner != principal.name and not principal.can(access.ADMIN):
+            raise HTTPException(403, "Solo un administrador delega en nombre de otra persona")
+        return approvals.delegate(
+            ctx,
+            username=owner,
+            to=body.delegate,
+            starts_on=body.starts_on,
+            ends_on=body.ends_on,
+            reason=body.reason,
+        )
+
+    # --- Webhooks y eventos ------------------------------------------------------------------
+
+    @app.get("/api/v1/webhooks", tags=["integración"])
+    def list_webhooks(_: Admin) -> dict[str, Any]:
+        return {"items": integrations.list_webhooks(ctx), "events": events.EVENT_TYPES}
+
+    @app.post("/api/v1/webhooks", tags=["integración"], status_code=201)
+    def create_webhook(body: WebhookBody, _: Admin) -> dict[str, Any]:
+        """Devuelve el secreto de la firma HMAC una sola vez."""
+        return integrations.add_webhook(
+            ctx, name=body.name, url=body.url, events=body.events, company_ruc=body.company_ruc
+        )
+
+    @app.delete("/api/v1/webhooks/{webhook_id}", tags=["integración"])
+    def delete_webhook(webhook_id: int, _: Admin) -> dict[str, Any]:
+        if not integrations.disable_webhook(ctx, webhook_id):
+            raise HTTPException(404, "No existe el webhook")
+        return {"id": webhook_id, "active": False}
+
+    @app.get("/api/v1/events", tags=["integración"])
+    def list_events(
+        _: AuditReader,
+        type: str | None = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    ) -> dict[str, Any]:
+        return {"items": integrations.list_events(ctx, event_type=type, limit=limit)}
 
     # --- Trabajos en cola ------------------------------------------------------------
 

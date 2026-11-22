@@ -215,3 +215,27 @@ def parse_ubl(data: bytes) -> StructuredDocument:
         "notes": notes,
     }
     return StructuredDocument("invoice", Extraction.model_validate(fields).model_dump())
+
+
+def parse_references(data: bytes) -> dict[str, list[str]]:
+    """Referencias de un comprobante UBL que sirven para el match de cuentas por pagar.
+
+    - ``orders``: ``cac:OrderReference/cbc:ID`` (orden de compra del cliente).
+    - ``despatches``: ``cac:DespatchDocumentReference/cbc:ID`` (guías de remisión).
+    - ``billing``: ``cac:BillingReference/cac:InvoiceDocumentReference/cbc:ID`` (la factura
+      que modifica una nota de crédito o débito).
+    """
+    try:
+        root = SafeET.fromstring(decode_xml(data))
+    except Exception as error:
+        raise DocumentReadError(f"XML mal formado: {error}") from error
+
+    def ids(nodes: list[Element], *path: str) -> list[str]:
+        found = [_text(_child(node, *path)) for node in nodes]
+        return [v.strip() for v in found if v and v.strip()]
+
+    return {
+        "orders": ids(_children(root, "OrderReference"), "ID"),
+        "despatches": ids(_children(root, "DespatchDocumentReference"), "ID"),
+        "billing": ids(_children(root, "BillingReference"), "InvoiceDocumentReference", "ID"),
+    }

@@ -34,6 +34,18 @@ ROOT = Path(__file__).resolve().parents[1]
 TODAY = "2026-10-31"
 
 _TABLES = (
+    "webhook_deliveries",
+    "outbox_events",
+    "webhooks",
+    "approval_requests",
+    "approval_rules",
+    "approval_delegations",
+    "supplier_accounting",
+    "invoice_matches",
+    "goods_receipt_lines",
+    "goods_receipts",
+    "purchase_order_lines",
+    "purchase_orders",
     "jobs",
     "schedules",
     "mail_attachments",

@@ -46,6 +46,19 @@ schedule_app = typer.Typer(
 )
 company_app = typer.Typer(help="Empresas (multiempresa): add · list · set", no_args_is_help=True)
 app.add_typer(company_app, name="company")
+purchasing_app = typer.Typer(
+    help="Compras: import-orders · import-receipts · orders · match", no_args_is_help=True
+)
+approvals_app = typer.Typer(
+    help="Aprobación de pago: list · approve · reject · rules · rule-add · delegate",
+    no_args_is_help=True,
+)
+webhook_app = typer.Typer(
+    help="Webhooks firmados: add · list · remove · events", no_args_is_help=True
+)
+app.add_typer(purchasing_app, name="purchasing")
+app.add_typer(approvals_app, name="approvals")
+app.add_typer(webhook_app, name="webhook")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(db_app, name="db")
@@ -566,6 +579,7 @@ def approve(
         result = approve_invoice(
             ctx.review_deps(), invoice_id, user=ctx.reviewer, note=note, force=force
         )
+        ctx.after_review_approved(int(result["invoice_id"]))
         out.line(f"Factura #{invoice_id} aprobada ({result['resolved']} incidencias resueltas)")
         out.data(result)
         return ExitCode.OK
@@ -1507,6 +1521,328 @@ def history(invoice_id: int) -> None:
                 f"revisión {v['review_status']}{reviewer}, SUNAT {v['sunat_status'] or '—'}"
             )
         out.data({"invoice_id": invoice_id, "versions": versions})
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Compras, aprobaciones y webhooks ------------------------------------------------------
+
+
+@purchasing_app.command("import-orders")
+def purchasing_import_orders(path: Path) -> None:
+    """Órdenes de compra desde CSV (una fila por línea; importes sin IGV)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.purchasing import import_orders_csv
+
+        result = import_orders_csv(ctx, path)
+        out.line(
+            f"{result['orders']} órdenes ({result['created']} nuevas, {result['updated']} actualizadas)"
+        )
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@purchasing_app.command("import-receipts")
+def purchasing_import_receipts(path: Path) -> None:
+    """Recepciones (notas de ingreso, guías, conformidades) desde CSV."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.purchasing import import_receipts_csv
+
+        result = import_receipts_csv(ctx, path)
+        out.line(f"{result['receipts']} recepciones registradas")
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@purchasing_app.command("orders")
+def purchasing_orders(
+    supplier: Annotated[str | None, typer.Option(help="RUC del proveedor")] = None,
+    status: Annotated[str | None, typer.Option(help="open | closed | cancelled")] = None,
+) -> None:
+    """Órdenes de compra con lo recibido y lo facturado."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.purchasing import list_orders
+
+        rows = list_orders(ctx, company_ids=None, supplier_ruc=supplier, status=status)
+        for o in rows:
+            out.line(
+                f"  {o['po_number']:<14} {o['supplier_ruc']} {o['currency']} "
+                f"pedido {format_cents(o['total_cents'])} · recibido {format_cents(o['received_cents'])} "
+                f"· facturado {format_cents(o['invoiced_cents'])} · {o['status']}"
+            )
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@purchasing_app.command("match")
+def purchasing_match(
+    invoice_id: int, po: Annotated[str | None, typer.Option(help="Vincular a esta orden")] = None
+) -> None:
+    """Hace (o rehace) el match de una factura con su orden de compra."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.purchasing import run_match
+
+        result = run_match(ctx, invoice_id, po_number=po)
+        out.line(
+            f"Factura #{invoice_id}: {result.get('status', 'nota')} {result.get('po_number') or ''}"
+        )
+        for e in result.get("exceptions") or []:
+            out.line(
+                f"  · {e['code']}: {e['message']} (esperado {e['expected']}, recibido {e['actual']})"
+            )
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@approvals_app.command("list")
+def approvals_list(
+    status: Annotated[
+        str, typer.Option(help="pending | approved | rejected | escalated")
+    ] = "pending",
+    approver: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Aprobaciones de pago (por defecto, las pendientes)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.approvals import list_requests
+
+        rows = list_requests(ctx, status=status, approver=approver)
+        for r in rows:
+            late = " · VENCIDA" if r["overdue"] else ""
+            out.line(
+                f"  #{r['id']:<6} {r['invoice']:<16} {r['currency']} {format_cents(r['total_cents'])} "
+                f"nivel {r['level']} → {r['approver']} · vence {r['due_at']:%Y-%m-%d %H:%M}{late}"
+            )
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+def _decide(approval_id: int, approve: bool, comment: str | None) -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.approvals import decide
+
+        result = decide(
+            ctx, approval_id, approve=approve, user=ctx.reviewer, comment=comment, is_admin=True
+        )
+        out.line(f"Aprobación #{approval_id}: factura {result['approval_status']}")
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@approvals_app.command("approve")
+def approvals_approve(
+    approval_id: int, comment: Annotated[str | None, typer.Option("--comment", "-c")] = None
+) -> None:
+    """Aprueba el pago (como administrador desde la CLI)."""
+    _decide(approval_id, True, comment)
+
+
+@approvals_app.command("reject")
+def approvals_reject(
+    approval_id: int, comment: Annotated[str, typer.Option("--comment", "-c")]
+) -> None:
+    """Rechaza el pago (exige motivo)."""
+    _decide(approval_id, False, comment)
+
+
+@approvals_app.command("rules")
+def approvals_rules() -> None:
+    """Matriz de aprobación."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.approvals import list_rules
+
+        rows = list_rules(ctx)
+        for r in rows:
+            upper = (
+                format_cents(r["max_amount_cents"]) if r["max_amount_cents"] is not None else "∞"
+            )
+            scope = ", ".join(
+                f"{k} {r[k]}"
+                for k in ("company_id", "cost_center", "supplier_ruc")
+                if r[k] is not None
+            )
+            out.line(
+                f"  #{r['id']:<4} nivel {r['level']} · S/ {format_cents(r['min_amount_cents'])} a {upper} → "
+                f"{r['approver'] or 'automático'} (SLA {r['sla_hours']} h"
+                f"{', escala a ' + r['escalate_to'] if r['escalate_to'] else ''}){' · ' + scope if scope else ''}"
+                f"{'' if r['active'] else ' · inactiva'}"
+            )
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@approvals_app.command("rule-add")
+def approvals_rule_add(
+    level: Annotated[int, typer.Option(min=1, max=9)] = 1,
+    approver: Annotated[
+        str | None, typer.Option(help="Usuario; vacío = automático si hay match")
+    ] = None,
+    min_amount: Annotated[float, typer.Option("--min", help="Soles (incluido)")] = 0,
+    max_amount: Annotated[float | None, typer.Option("--max", help="Soles (excluido)")] = None,
+    company: Annotated[str | None, typer.Option(help="RUC de la empresa")] = None,
+    cost_center: Annotated[str | None, typer.Option()] = None,
+    supplier: Annotated[str | None, typer.Option(help="RUC del proveedor")] = None,
+    sla_hours: Annotated[int, typer.Option(min=1)] = 48,
+    escalate_to: Annotated[
+        str | None, typer.Option(help="Usuario al que se escala si vence")
+    ] = None,
+) -> None:
+    """Agrega una regla a la matriz de aprobación."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.approvals import add_rule
+
+        rule = add_rule(
+            ctx,
+            level=level,
+            approver=approver,
+            min_amount_cents=round(min_amount * 100),
+            max_amount_cents=round(max_amount * 100) if max_amount is not None else None,
+            company_id=_company_ids(ctx, [company])[0] if company else None,  # type: ignore[index]
+            cost_center=cost_center,
+            supplier_ruc=supplier,
+            sla_hours=sla_hours,
+            escalate_to=escalate_to,
+        )
+        out.line(f"Regla #{rule['id']} creada")
+        out.data(rule)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@approvals_app.command("rule-remove")
+def approvals_rule_remove(rule_id: int) -> None:
+    """Desactiva una regla (se conserva para el historial)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.approvals import disable_rule
+
+        if not disable_rule(ctx, rule_id):
+            raise ConfigError(f"No existe la regla #{rule_id}")
+        out.line(f"Regla #{rule_id} desactivada")
+        return ExitCode.OK
+
+    _run(command)
+
+
+@approvals_app.command("delegate")
+def approvals_delegate(
+    username: str,
+    to: Annotated[str, typer.Option("--to", help="Quién aprueba en su lugar")],
+    starts: Annotated[str, typer.Option("--from", help="AAAA-MM-DD")],
+    ends: Annotated[str, typer.Option("--until", help="AAAA-MM-DD (incluido)")],
+    reason: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Delega las aprobaciones de alguien durante unas fechas (vacaciones, licencias)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.approvals import delegate
+
+        try:
+            start_day, end_day = date.fromisoformat(starts), date.fromisoformat(ends)
+        except ValueError as error:
+            raise ConfigError("Usa fechas AAAA-MM-DD") from error
+        row = delegate(
+            ctx, username=username, to=to, starts_on=start_day, ends_on=end_day, reason=reason
+        )
+        out.line(f"{username} delega en {to} del {starts} al {ends}")
+        out.data(row)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@webhook_app.command("add")
+def webhook_add(
+    name: str,
+    url: str,
+    events: Annotated[
+        str, typer.Option(help='Eventos separados por comas; "*" o "invoice.*"')
+    ] = "*",
+    company: Annotated[str | None, typer.Option(help="RUC: solo eventos de esa empresa")] = None,
+) -> None:
+    """Suscribe una URL a eventos (firma HMAC-SHA256; el secreto se muestra una sola vez)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.integrations import add_webhook
+
+        hook = add_webhook(ctx, name=name, url=url, events=events, company_ruc=company)
+        out.line(f"Webhook #{hook['id']} {hook['name']} → {hook['url']} ({hook['events']})")
+        out.line(f"Secreto de firma (se muestra una sola vez): {hook['secret']}")
+        out.data(hook)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@webhook_app.command("list")
+def webhook_list() -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.integrations import list_webhooks
+
+        rows = list_webhooks(ctx)
+        for h in rows:
+            state = "activo" if h["active"] else "inactivo"
+            out.line(
+                f"  #{h['id']} {h['name']} → {h['url']} · {h['events']} · {state} · {h['failed_deliveries']} entregas fallidas"
+            )
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@webhook_app.command("remove")
+def webhook_remove(webhook_id: int) -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.integrations import disable_webhook
+
+        if not disable_webhook(ctx, webhook_id):
+            raise ConfigError(f"No existe el webhook #{webhook_id}")
+        out.line(f"Webhook #{webhook_id} desactivado")
+        return ExitCode.OK
+
+    _run(command)
+
+
+@webhook_app.command("events")
+def webhook_events(
+    event_type: Annotated[str | None, typer.Option("--type")] = None,
+    limit: Annotated[int, typer.Option(min=1, max=500)] = 30,
+) -> None:
+    """Últimos eventos publicados y el estado de sus entregas."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.integrations import list_events
+
+        rows = list_events(ctx, event_type=event_type, limit=limit)
+        for e in rows:
+            states = ", ".join(d["status"] for d in e["deliveries"]) or "sin suscriptores"
+            out.line(
+                f"  {e['time']:%Y-%m-%d %H:%M:%S} {e['type']:<30} {e['subject'] or ''} · {states}"
+            )
+        out.data(rows)
         return ExitCode.OK
 
     _run(command)

@@ -12,6 +12,11 @@
 | ``db.backup`` | default | Copia de seguridad (si toca) |
 | ``jobs.purge`` | default | Borra los trabajos terminados antiguos |
 | ``bot.cycle`` | default | El ciclo completo de `invoicebot run` (modo clásico) |
+| ``purchasing.match`` | default | Match con la orden de compra, nota aplicada y cuenta contable |
+| ``approvals.start`` | default | Empieza la aprobación de pago de una factura revisada |
+| ``approvals.remind`` | default | Recordatorios y escalamiento de aprobaciones vencidas |
+| ``webhooks.deliver`` | default | Entrega firmada de un evento a un webhook |
+| ``webhooks.sweep`` | default | Encola las entregas pendientes que quedaron sin trabajo |
 """
 
 from __future__ import annotations
@@ -237,3 +242,62 @@ def cycle(ctx: AppContext, payload: dict[str, Any]) -> dict[str, Any]:
         "error": result.error,
         "summary": result.report.compact(),
     }
+
+
+@registry.task(
+    "purchasing.match",
+    queue="default",
+    description="Match de una factura con su orden de compra y recepción",
+)
+def purchasing_match(ctx: AppContext, payload: dict[str, Any]) -> dict[str, Any]:
+    from invoicebot.application.purchasing import run_match
+
+    invoice_id = payload.get("invoice_id")
+    if not isinstance(invoice_id, int):
+        raise PermanentJobError("Falta invoice_id (número)")
+    return run_match(ctx, invoice_id, po_number=payload.get("po_number"))
+
+
+@registry.task(
+    "approvals.start", queue="default", description="Empieza la aprobación de pago de una factura"
+)
+def approvals_start(ctx: AppContext, payload: dict[str, Any]) -> dict[str, Any]:
+    from invoicebot.application.approvals import start
+
+    invoice_id = payload.get("invoice_id")
+    if not isinstance(invoice_id, int):
+        raise PermanentJobError("Falta invoice_id (número)")
+    return start(ctx, invoice_id, restart=bool(payload.get("restart")))
+
+
+@registry.task(
+    "approvals.remind", queue="default", description="Recordatorios y escalamiento de aprobaciones"
+)
+def approvals_remind(ctx: AppContext, _payload: dict[str, Any]) -> dict[str, Any]:
+    from invoicebot.application.approvals import remind
+
+    return remind(ctx)
+
+
+@registry.task(
+    "webhooks.deliver",
+    queue="default",
+    description="Entrega firmada de un evento a un webhook",
+    # Los reintentos los cuenta la entrega (MAX_DELIVERY_ATTEMPTS); el trabajo admite más.
+    max_attempts=12,
+    time_limit_s=60,
+)
+def webhooks_deliver(ctx: AppContext, payload: dict[str, Any]) -> dict[str, Any]:
+    from invoicebot.application.events import deliver
+
+    delivery_id = payload.get("delivery_id")
+    if not isinstance(delivery_id, int):
+        raise PermanentJobError("Falta delivery_id (número)")
+    return deliver(ctx, delivery_id)
+
+
+@registry.task("webhooks.sweep", queue="default", description="Encola las entregas pendientes")
+def webhooks_sweep(ctx: AppContext, _payload: dict[str, Any]) -> dict[str, Any]:
+    from invoicebot.application.events import dispatch
+
+    return {"queued": dispatch(ctx)}

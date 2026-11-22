@@ -47,6 +47,8 @@ def configured_schedules(config: Config) -> list[dict[str, Any]]:
         ("export", s.export, "exports.monthly", config.run.export != "none"),
         ("backup", s.backup, "db.backup", True),
         ("purge", s.purge, "jobs.purge", True),
+        ("approvals", s.approvals, "approvals.remind", config.purchasing.enabled),
+        ("webhooks", s.webhooks, "webhooks.sweep", True),
     ]
     return [
         {"name": name, "cron": cron, "task": task, "payload": {}}

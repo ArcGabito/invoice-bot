@@ -414,6 +414,9 @@ def process_document(deps: Deps, *, document: dict[str, Any], file_path: str) ->
     log.info(
         "documento extraído", extra={"document_id": doc_id, "status": status, "source": data_source}
     )
+    after_saved = deps.extra.get("after_invoice_saved")
+    if after_saved is not None:
+        after_saved(invoice_id)
     return ProcessResult(
         "extracted",
         validation_status=status,
