@@ -13,9 +13,15 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - API: `GET /api/v1/tasks`, `GET/POST /api/v1/jobs`, `GET /api/v1/jobs/{id}`, progreso en vivo por Server-Sent Events (`/api/v1/jobs/{id}/events`), `POST /api/v1/jobs/{id}/retry|cancel`, `GET /api/v1/schedules` y `GET /metrics` (Prometheus, con clave de lectura). Cabecera `Idempotency-Key` en `POST /api/v1/documents` y `POST /api/v1/jobs`.
 - `INVOICEBOT_AUTO_MIGRATE=false` para que solo `invoicebot db migrate` (servicio `migrate`, Job `migrate`) cambie el esquema cuando hay varias réplicas.
 - `invoicebot doctor` comprueba la cola y `invoicebot config` la muestra.
+- **Multiempresa** (migración `007_companies_roles_audit`): tabla `companies`, `invoicebot company add|list|set`, `GET/POST /api/v1/companies`. Cada comprobante se asigna a la empresa de su RUC adquirente; si hay empresas y el adquirente no es ninguna, advertencia `CUSTOMER_NOT_A_COMPANY`.
+- **Row-Level Security** de SQL Server sobre `invoices`: una persona o clave de API limitada a ciertas empresas no ve ni modifica comprobantes de las demás, en ninguna consulta (`SESSION_CONTEXT('invoicebot.companies')`).
+- **Roles** `admin`, `accountant`, `approver`, `treasury` y `auditor` con permisos por endpoint (`invoicebot user add --role`, `user set-role`, `user companies`, `user email`). Claves de API con permisos finos (`--permissions`) y por empresa (`--company`). `GET /api/v1/auth/me` devuelve rol, permisos y empresas.
+- **Inicio de sesión único** con Microsoft Entra ID, Google Workspace u otro proveedor OIDC (`INVOICEBOT_OIDC_*`): PKCE, `state` de un solo uso en SQL Server, `id_token` verificado con JWKS y nonce; vinculación por correo y alta automática opcional con un rol que no sea admin.
+- **Auditoría**: triggers que guardan cada estado de `invoices` y `companies` (`invoice_changes`, `company_changes`) con quién hizo el cambio (persona, clave de API o trabajo). `invoicebot history <id>` y `GET /api/v1/invoices/{id}/history`.
 
 ### Cambiado
 
+- Los usuarios existentes quedan con el rol `admin` (mismos permisos que en la 1.0).
 - **uv**: `uv.lock`, `.python-version` (3.13) y grupo de dependencias `dev` (PEP 735). El Dockerfile instala con `uv sync --locked` y el CI usa `astral-sh/setup-uv`. `pip install -e .` sigue funcionando.
 - Con la cola Redis, `POST /api/v1/documents` responde `202` con el trabajo y `POST /api/v1/runs` encola un `bot.cycle`. Sin Redis responden como antes.
 - **Docker Compose**: servicios `api`, `worker` (ingest, sunat, default), `extractor` (OCR e IA, con más CPU), `scheduler`, `redis` (AOF, `noeviction`, contraseña) y `migrate` (perfil `tools`).

@@ -14,8 +14,12 @@
       <label>Usuario <input name="username" autocomplete="username" required maxlength="40" autofocus></label>
       <label>Contraseña <input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
       <button type="submit" class="primary">Entrar</button>
-      <p id="login-error" class="error" role="alert"></p>
+      <p id="login-error" class="error" role="alert">{{ error }}</p>
     </form>
+    {% if sso %}
+    <p class="muted sso-divider">o</p>
+    <a class="button sso" href="/auth/oidc/login">Entrar con {{ sso }}</a>
+    {% endif %}
   </main>
   <script src="/static/login.js"></script>
 </body>

@@ -32,6 +32,7 @@ La versión 1.0 es la migración completa a Python de la 0.6 (Node.js, etiqueta 
 | **Cadena de conexión de SSMS**, seguridad integrada de Windows e identidad administrada de Azure | ✅ nuevo |
 | Solución de **Visual Studio** (`invoice-bot.slnx` + proyecto Python) | ✅ |
 | **Colas con Redis (Dramatiq)**: workers que escalan, reintentos con espera, idempotencia, programador cron | ✅ 1.1 |
+| **Multiempresa** con Row-Level Security, **roles**, **inicio de sesión con Microsoft o Google** y auditoría de cambios ([guía](docs/seguridad-y-empresas.md)) | ✅ 1.1 |
 | **uv** (`uv.lock`) para dependencias reproducibles en desarrollo, Docker y CI | ✅ 1.1 |
 
 El plan por fases (multiempresa, aprobaciones, SIRE, pagos, portal de proveedores) está en [ROADMAP.md](ROADMAP.md).
@@ -121,8 +122,10 @@ La imagen (`Dockerfile`, construida con uv) incluye ODBC 18 y Tesseract con espa
 | `invoicebot verify-sunat [--month] [--force]` | Consulta integrada de SUNAT. |
 | `invoicebot fx set 15/10/2026 3.750` · `fx fetch` · `fx import tc.csv` · `fx list` | Tipo de cambio. |
 | `invoicebot mail check` · `mail fetch` · `mail list` · `mail login` | Correo ([modo empresa](docs/correo-empresa.md)). |
-| `invoicebot user add/list/reset-password/disable/enable` | Usuarios de la pantalla de revisión. |
-| `invoicebot apikey create <sistema> --scope write` · `list` · `revoke` | Claves de la API para otros sistemas. |
+| `invoicebot user add [--role] [--email] [--company RUC]` · `list` · `set-role` · `companies` · `email` · `reset-password` · `disable` · `enable` | Usuarios, roles y empresas que ven. |
+| `invoicebot apikey create <sistema> --scope write [--company RUC] [--permissions …]` · `list` · `revoke` | Claves de la API para otros sistemas. |
+| `invoicebot company add <ruc> <razón social>` · `list` · `set` | Empresas (multiempresa). |
+| `invoicebot history <id>` | Historial de cambios de una factura y quién los hizo. |
 | `invoicebot db init` · `db migrate` · `db status` · `backup [--list]` | Base de datos. |
 | `invoicebot doctor` · `config` | Diagnóstico y configuración efectiva (sin secretos). |
 
@@ -134,8 +137,8 @@ Códigos de salida: `0` completado · `1` error general · `2` argumentos o conf
 
 Documentación interactiva en `/docs` (OpenAPI). Autenticación:
 
-- **Personas**: `POST /api/v1/auth/login` → cookie de sesión `HttpOnly`, `SameSite=Strict`, `Secure` con HTTPS; cada acción lleva la cabecera `X-CSRF-Token`. Bloqueo de 15 minutos tras 5 intentos fallidos.
-- **Sistemas**: `Authorization: Bearer ibk_…` o `X-API-Key: ibk_…` (`invoicebot apikey create`), con alcance `read` o `write`.
+- **Personas**: `POST /api/v1/auth/login` (o **Entrar con Microsoft/Google**, `/auth/oidc/login`) → cookie de sesión `HttpOnly`, `SameSite`, `Secure` con HTTPS; cada acción lleva la cabecera `X-CSRF-Token`. Bloqueo de 15 minutos tras 5 intentos fallidos. Cada persona tiene un rol y puede limitarse a ciertas empresas.
+- **Sistemas**: `Authorization: Bearer ibk_…` o `X-API-Key: ibk_…` (`invoicebot apikey create`), con alcance `read`/`write` o permisos finos, y opcionalmente una sola empresa.
 
 | Método y ruta | Uso |
 | --- | --- |
@@ -150,6 +153,7 @@ Documentación interactiva en `/docs` (OpenAPI). Autenticación:
 | `GET/POST /api/v1/runs` | Historial y lanzamiento de ciclos (el candado de SQL Server evita dos a la vez). |
 | `GET /api/v1/tasks` · `GET/POST /api/v1/jobs` · `GET /api/v1/jobs/{id}` · `/events` (SSE) · `POST …/retry` · `…/cancel` | Trabajos en cola y su progreso en vivo. |
 | `GET /api/v1/schedules` | Programaciones y su próxima ejecución. |
+| `GET/POST /api/v1/companies` · `GET /api/v1/invoices/{id}/history` · `GET /api/v1/auth/me` | Empresas, historial de cambios y permisos de quien llama. |
 | `GET /healthz` · `GET /readyz` · `GET /metrics` | Sondas de vida y de disponibilidad (base de datos, esquema y cola) y métricas Prometheus (clave de lectura). |
 
 ```bash

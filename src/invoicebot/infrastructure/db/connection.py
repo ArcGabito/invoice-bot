@@ -18,6 +18,7 @@ import re
 import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
@@ -233,6 +234,54 @@ def _from_ado(raw: Mapping[str, str]) -> dict[str, str]:
     return parts
 
 
+#: Empresas que puede ver quien hace la petición (None = todas). Lo fija la API por
+#: petición; los workers, la CLI y el programador no lo tocan y ven todo.
+COMPANY_SCOPE: ContextVar[tuple[int, ...] | None] = ContextVar(
+    "invoicebot_company_scope", default=None
+)
+#: Quién hace el cambio, para la auditoría (trigger de `invoices`): una persona, una clave
+#: de API ("api:erp") o un trabajo ("job:documents.process#12").
+ACTOR: ContextVar[str | None] = ContextVar("invoicebot_actor", default=None)
+_SCOPE_KEY = "invoicebot.companies"
+_ACTOR_KEY = "invoicebot.actor"
+#: Valor que no coincide con ninguna empresa: alguien limitado a ninguna no ve nada.
+_NO_COMPANY = "0"
+
+
+def company_scope_value(scope: tuple[int, ...] | None) -> str | None:
+    if scope is None:
+        return None
+    return ",".join(str(int(c)) for c in scope) or _NO_COMPANY
+
+
+def apply_company_scope(dbapi_connection: Any, info: dict[str, Any]) -> None:
+    """Alinea SESSION_CONTEXT con la petición o el trabajo actual.
+
+    - ``invoicebot.companies``: la Row-Level Security (migración 007) filtra `invoices`.
+    - ``invoicebot.actor``: el trigger de auditoría registra quién hizo el cambio.
+
+    Las conexiones del pool se reutilizan: solo se envía lo que cambió.
+    """
+    wanted = {
+        _SCOPE_KEY: company_scope_value(COMPANY_SCOPE.get()),
+        _ACTOR_KEY: (ACTOR.get() or None),
+    }
+    changed = [(k, v) for k, v in wanted.items() if info.get(k) != v]
+    if not changed:
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        for key, value in changed:
+            cursor.execute(
+                "EXEC sp_set_session_context @key = ?, @value = ?",
+                key,
+                value[:150] if value and key == _ACTOR_KEY else value,
+            )
+            info[key] = value
+    finally:
+        cursor.close()
+
+
 class Database:
     """Motor de SQLAlchemy sobre pyodbc para una base de datos concreta."""
 
@@ -267,6 +316,10 @@ class Database:
         def _on_connect(dbapi_connection: Any, _record: Any) -> None:
             # Lectura de NVARCHAR(MAX) y DATETIME2 sin sorpresas de codificación.
             dbapi_connection.setdecoding(pyodbc.SQL_WCHAR, encoding="utf-16le")
+
+        @event.listens_for(self.engine, "checkout")
+        def _on_checkout(dbapi_connection: Any, record: Any, _proxy: Any) -> None:
+            apply_company_scope(dbapi_connection, record.info)
 
         self._edition: int | None = None
         self._lock = threading.Lock()

@@ -25,6 +25,7 @@ from invoicebot.logging_setup import configure_logging
 
 if TYPE_CHECKING:
     from invoicebot.application.jobs import JobQueue, Jobs
+    from invoicebot.infrastructure.db.company_repository import CompanyRepository
     from invoicebot.infrastructure.db.job_repository import JobRepository
     from invoicebot.infrastructure.queue import RateLimiter
 
@@ -112,6 +113,13 @@ class AppContext:
         return InvoiceRepository(self.db)
 
     @cached_property
+    def companies(self) -> CompanyRepository:
+        from invoicebot.infrastructure.db.company_repository import CompanyRepository
+
+        self.ensure_schema()
+        return CompanyRepository(self.db)
+
+    @cached_property
     def users(self) -> UserRepository:
         self.ensure_schema()
         return UserRepository(self.db)
@@ -168,6 +176,21 @@ class AppContext:
         from invoicebot.infrastructure.sunat import create_sunat_client
 
         return create_sunat_client(self.config)
+
+    @cached_property
+    def oidc(self) -> Any:
+        """Cliente OpenID Connect (INVOICEBOT_OIDC_*), o ConfigError si no está configurado."""
+        from invoicebot.infrastructure.oidc import OidcClient
+
+        settings = self.config.oidc
+        if not settings.enabled:
+            raise ConfigError("El inicio de sesión único no está configurado (INVOICEBOT_OIDC_*)")
+        return OidcClient(
+            issuer=str(settings.issuer),
+            client_id=str(settings.client_id),
+            client_secret=self.config.secret("INVOICEBOT_OIDC_CLIENT_SECRET"),
+            scopes=settings.scopes,
+        )
 
     def mail_source(self) -> MailSource:
         from invoicebot.infrastructure.mail.factory import create_mail_source

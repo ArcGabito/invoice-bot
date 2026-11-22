@@ -239,9 +239,12 @@ class Jobs:
         except ConfigError as error:
             self.repository.fail(job_id, error.message, retry_at=None)
             return "failed"
+        from invoicebot.infrastructure.db.connection import ACTOR
+
         payload = job.get("payload") or {}
         previous = self.current_job_id
         self._local.job_id = job_id
+        actor_token = ACTOR.set(f"job:{spec.name}#{job_id}")
         log_extra = {"job_id": job_id, "task": spec.name, "attempt": job["attempts"]}
         self.logger.info("inicio del trabajo %s #%s", spec.name, job_id, extra=log_extra)
         try:
@@ -277,6 +280,7 @@ class Jobs:
             return "retrying"
         finally:
             self._local.job_id = previous
+            ACTOR.reset(actor_token)
         self.repository.succeed(job_id, _plain(result))
         self.logger.info("fin del trabajo %s #%s", spec.name, job_id, extra=log_extra)
         return "succeeded"
