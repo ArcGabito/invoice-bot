@@ -19,6 +19,7 @@
 | ``webhooks.sweep`` | default | Encola las entregas pendientes que quedaron sin trabajo |
 | ``sunat.reverify`` | sunat | Reconsulta en SUNAT los comprobantes del mes anterior |
 | ``compliance.alerts`` | default | Plazo del crédito fiscal y detracciones pendientes |
+| ``payments.schedule`` | default | Programa el pago de una factura autorizada |
 """
 
 from __future__ import annotations
@@ -337,3 +338,15 @@ def compliance_alerts(ctx: AppContext, _payload: dict[str, Any]) -> dict[str, An
     from invoicebot.application.tax import compliance_alerts as run
 
     return run(ctx)
+
+
+@registry.task(
+    "payments.schedule", queue="default", description="Programa el pago de una factura autorizada"
+)
+def payments_schedule(ctx: AppContext, payload: dict[str, Any]) -> dict[str, Any]:
+    from invoicebot.application.payables import schedule_payment
+
+    invoice_id = payload.get("invoice_id")
+    if not isinstance(invoice_id, int):
+        raise PermanentJobError("Falta invoice_id (número)")
+    return schedule_payment(ctx, invoice_id)

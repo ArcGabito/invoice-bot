@@ -28,6 +28,7 @@ RUNS_WRITE = "runs:write"
 JOBS_READ = "jobs:read"
 JOBS_WRITE = "jobs:write"
 AUDIT_READ = "audit:read"
+PAYMENTS_WRITE = "payments:write"
 ADMIN = "admin"
 
 PERMISSIONS: frozenset[str] = frozenset(
@@ -44,6 +45,7 @@ PERMISSIONS: frozenset[str] = frozenset(
         JOBS_READ,
         JOBS_WRITE,
         AUDIT_READ,
+        PAYMENTS_WRITE,
         ADMIN,
     }
 )
@@ -66,7 +68,7 @@ ROLES: dict[str, frozenset[str]] = {
         }
     ),
     "approver": frozenset({INVOICES_READ, APPROVALS_WRITE, EXPORTS_READ}),
-    "treasury": frozenset({INVOICES_READ, EXPORTS_READ}),
+    "treasury": frozenset({INVOICES_READ, EXPORTS_READ, PAYMENTS_WRITE}),
     "auditor": frozenset({INVOICES_READ, EXPORTS_READ, JOBS_READ, AUDIT_READ}),
 }
 
@@ -93,6 +95,7 @@ API_SCOPES: dict[str, frozenset[str]] = {
             SUNAT_WRITE,
             RUNS_WRITE,
             JOBS_WRITE,
+            PAYMENTS_WRITE,
         }
     ),
 }

@@ -105,3 +105,50 @@ def valid(secret: str, headers, body: bytes) -> bool:
 ```
 
 Usa `X-InvoiceBot-Delivery` para no procesar dos veces la misma entrega y rechaza marcas de tiempo de más de 5 minutos.
+
+## 5. Contabilidad y pagos
+
+### Asiento de provisión (PCGE)
+
+Cada factura autorizada para pago genera su asiento:
+
+| Cuenta | Debe | Haber |
+| --- | --- | --- |
+| Cuenta contable de la factura (o `INVOICEBOT_ACCOUNT_EXPENSE`, 6329) | base | |
+| `INVOICEBOT_ACCOUNT_IGV` (40111) | IGV | |
+| `INVOICEBOT_ACCOUNT_OTHER_TAXES` (6419) | ISC, ICBPER y otros | |
+| `INVOICEBOT_ACCOUNT_PAYABLE` (4212) | | total |
+| Destino del centro de costo (p. ej. 94) | base | |
+| `INVOICEBOT_ACCOUNT_DESTINATION_CREDIT` (791) | | base |
+
+Las notas de crédito invierten el asiento; en dólares se registra en soles con el tipo de cambio de la factura y el importe original. Si la conversión deja un céntimo de diferencia, va a la cuenta por pagar para que el asiento cuadre.
+
+```bash
+invoicebot accounting cost-center ADM "Administración" --destination 94
+invoicebot accounting entries --month 2026-10 --format concar -o asientos-202610.xlsx
+```
+
+`GET /api/v1/accounting/entries?month=2026-10&format=json|csv|xlsx|concar` sirve al ERP (Vortex ERP, Odoo) o para importar en Concar. Las columnas de la plantilla tipo Concar están en `application/payables.py::CONCAR_COLUMNS`: revísalas con tu versión antes de importar.
+
+### Programación de pagos
+
+Al quedar autorizada (`approved` o `not_required`), la tarea `payments.schedule` fija:
+
+- la **fecha**: el vencimiento del comprobante o la emisión más `INVOICEBOT_PAYMENT_TERMS_DAYS` (30);
+- el **importe neto**: total menos retención (si la empresa es agente), detracción y notas de crédito aplicadas.
+
+Publica `invoice.payment_scheduled`: bank-bot la recibe como partida por pagar (o la consulta con `GET /api/v1/payables`).
+
+### Confirmación del pago
+
+bank-bot, al conciliar el cargo del extracto, llama a `POST /api/v1/payments` con una clave con permiso `payments:write` (rol `treasury` o alcance `write`):
+
+```json
+{"supplier_ruc": "20100047218", "series": "F001", "number": "900", "amount": 1144.60, "paid_on": "2026-11-14", "reference": "OP-778899"}
+```
+
+La factura pasa a `partial` o `paid` y se publica `invoice.paid`. Repetir el mismo `reference` no duplica el pago.
+
+### Avisos al proveedor
+
+`invoice.received` (acuse de recibo), `invoice.rejected` (con el motivo), `invoice.payment_scheduled` e `invoice.paid` llevan `supplier_email`: el correo desde el que llegó el comprobante. email-bot los usa para avisar al proveedor.

@@ -204,7 +204,13 @@ def start(ctx: AppContext, invoice_id: int, *, restart: bool = False) -> dict[st
             pending.status, pending.token_hash = "cancelled", None
         status = _advance(ctx, session, invoice, after_level=0, now=now)
     events.dispatch(ctx)
+    _after(ctx, invoice_id, status)
     return {"invoice_id": invoice_id, "approval_status": status}
+
+
+def _after(ctx: AppContext, invoice_id: int, status: str) -> None:
+    if status in PAYABLE:
+        ctx.after_payment_authorized(invoice_id)
 
 
 def _check_approver(
@@ -272,6 +278,7 @@ def decide(
             ctx, session, request, approve=approve, user=user, comment=comment, now=now
         )
     events.dispatch(ctx)
+    _after(ctx, int(result["invoice_id"]), result["approval_status"])
     return result
 
 
@@ -322,6 +329,7 @@ def decide_by_token(
             now=now,
         )
     events.dispatch(ctx)
+    _after(ctx, int(result["invoice_id"]), result["approval_status"])
     return result
 
 
