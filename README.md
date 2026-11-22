@@ -59,7 +59,7 @@ Sin Redis (`INVOICEBOT_QUEUE_BACKEND=inline`), todo corre en un proceso con `inv
 src/invoicebot/
   domain/          reglas puras: normalización, validación, detracciones, SUNAT, duplicados
   application/     casos de uso: procesar, escanear, reintentar, revisar, exportar, ciclo RPA
-  infrastructure/  SQL Server, UBL, PDF (PDFium), OCR, Claude/Ollama, SUNAT, correo, Excel, colas
+  infrastructure/  SQL Server (SQLAlchemy 2.0 ORM), UBL, PDF (PDFium), OCR, Claude/Ollama, SUNAT, correo, Excel, colas
   api/             FastAPI: REST, autenticación, pantalla de revisión
   cli.py           Typer: los mismos comandos de la versión 0.x
 ```
