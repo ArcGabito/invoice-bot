@@ -496,4 +496,39 @@ M009 = Migration(
     ),
 )
 
-V1_MIGRATIONS = (M005, M006, M007, M008, M009)
+#: Contabilidad y pagos: centros de costo con cuenta de destino, programación de pagos
+#: y pagos confirmados (por tesorería o bank-bot).
+M010 = Migration(
+    10,
+    "010_accounting_payments",
+    (
+        """ALTER TABLE invoices ADD
+      -- unpaid | scheduled | partial | paid
+      payment_status         NVARCHAR(12) NULL,
+      scheduled_payment_date DATE         NULL,
+      payable_cents          BIGINT       NULL,
+      paid_cents             BIGINT       NULL""",
+        "CREATE INDEX ix_invoices_payment ON invoices (payment_status, scheduled_payment_date) WHERE payment_status IS NOT NULL",
+        """CREATE TABLE cost_centers (
+      code                NVARCHAR(30)  NOT NULL CONSTRAINT pk_cost_centers PRIMARY KEY,
+      name                NVARCHAR(150) NOT NULL,
+      -- Cuenta de destino (clase 9) para el asiento de destino; NULL = sin destino.
+      destination_account NVARCHAR(20)  NULL,
+      active              BIT           NOT NULL CONSTRAINT df_cost_centers_active DEFAULT 1
+    )""",
+        f"""CREATE TABLE payments (
+      id           INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_payments PRIMARY KEY,
+      invoice_id   INT NOT NULL CONSTRAINT fk_payments_invoice REFERENCES invoices (id) ON DELETE CASCADE,
+      amount_cents BIGINT        NOT NULL,
+      paid_on      DATE          NOT NULL,
+      reference    NVARCHAR(60)  NULL,
+      source       NVARCHAR(20)  NOT NULL CONSTRAINT df_payments_source DEFAULT N'manual',
+      created_by   NVARCHAR(150) NULL,
+      created_at   DATETIME2(3)  NOT NULL {_NOW.format("payments")}
+    )""",
+        "CREATE INDEX ix_payments_invoice ON payments (invoice_id)",
+        "CREATE UNIQUE INDEX uq_payments_reference ON payments (invoice_id, reference) WHERE reference IS NOT NULL",
+    ),
+)
+
+V1_MIGRATIONS = (M005, M006, M007, M008, M009, M010)

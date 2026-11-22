@@ -165,7 +165,13 @@ class AppContext:
         return {"after_invoice_saved": self.after_invoice_saved}
 
     def after_invoice_saved(self, invoice_id: int) -> None:
-        """Cada factura guardada pasa por el match de compras (en la cola `default`)."""
+        """Cada factura guardada: acuse de recibo (evento) y match de compras (cola `default`)."""
+        from invoicebot.application.payables import publish_received
+
+        try:
+            publish_received(self, invoice_id)
+        except Exception as error:
+            self.logger.warning("no se pudo publicar invoice.received #%s: %s", invoice_id, error)
         try:
             self.jobs.enqueue(
                 "purchasing.match", {"invoice_id": invoice_id}, dedupe_key=f"match:{invoice_id}"
@@ -179,6 +185,17 @@ class AppContext:
             self.jobs.enqueue(
                 "approvals.start", {"invoice_id": invoice_id}, dedupe_key=f"approval:{invoice_id}"
             )
+
+    def after_review_rejected(self, invoice_id: int, reason: str | None) -> None:
+        from invoicebot.application.payables import publish_rejected
+
+        publish_rejected(self, invoice_id, reason)
+
+    def after_payment_authorized(self, invoice_id: int) -> None:
+        """Autorizada para pago: se programa (fecha e importe neto) en la cola `default`."""
+        self.jobs.enqueue(
+            "payments.schedule", {"invoice_id": invoice_id}, dedupe_key=f"payment:{invoice_id}"
+        )
 
     def public_url(self, path: str) -> str:
         base = self.config.public_url or ""

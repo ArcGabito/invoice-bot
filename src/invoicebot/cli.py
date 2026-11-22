@@ -70,6 +70,10 @@ taxpayer_app = typer.Typer(
 app.add_typer(sire_app, name="sire")
 app.add_typer(detraction_app, name="detractions")
 app.add_typer(taxpayer_app, name="taxpayers")
+accounting_app = typer.Typer(help="Contabilidad: entries · cost-center", no_args_is_help=True)
+payments_app = typer.Typer(help="Pagos: payables · schedule · record", no_args_is_help=True)
+app.add_typer(accounting_app, name="accounting")
+app.add_typer(payments_app, name="payments")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(schedule_app, name="schedule")
 app.add_typer(db_app, name="db")
@@ -606,6 +610,7 @@ def reject(invoice_id: int, reason: Annotated[str, typer.Option("--reason", "-r"
         from invoicebot.application.review import reject_invoice
 
         out.data(reject_invoice(ctx.review_deps(), invoice_id, user=ctx.reviewer, reason=reason))
+        ctx.after_review_rejected(invoice_id, reason)
         out.line(f"Factura #{invoice_id} rechazada")
         return ExitCode.OK
 
@@ -2055,6 +2060,124 @@ def taxpayers_retentions(
                 )
         out.line(f"Total a retener: S/ {format_cents(sum(r['retention_cents'] for r in rows))}")
         out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Contabilidad y pagos ----------------------------------------------------------------------
+
+
+@accounting_app.command("entries")
+def accounting_entries(
+    month: Annotated[str, typer.Option(help="AAAA-MM")],
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    fmt: Annotated[str, typer.Option("--format", help="csv | xlsx | concar")] = "csv",
+) -> None:
+    """Asientos de provisión (PCGE) de las facturas autorizadas del mes."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.payables import journal, journal_csv, journal_xlsx
+
+        lines = journal(ctx, month=month)
+        if fmt not in ("csv", "xlsx", "concar"):
+            raise ConfigError("--format es csv, xlsx o concar")
+        if output:
+            if fmt == "csv":
+                output.write_text(journal_csv(lines), encoding="utf-8-sig")
+            else:
+                output.write_bytes(journal_xlsx(lines, concar=fmt == "concar"))
+            out.line(f"{len(lines)} líneas en {output}")
+        else:
+            out.line(journal_csv(lines))
+        out.data([line.__dict__ for line in lines])
+        return ExitCode.OK
+
+    _run(command)
+
+
+@accounting_app.command("cost-center")
+def accounting_cost_center(
+    code: str,
+    name: str,
+    destination: Annotated[str | None, typer.Option(help="Cuenta de destino (clase 9)")] = None,
+) -> None:
+    """Crea o cambia un centro de costo (y su cuenta de destino)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.payables import add_cost_center
+
+        row = add_cost_center(ctx, code=code, name=name, destination_account=destination)
+        out.line(f"Centro de costo {code} · {name}{' → ' + destination if destination else ''}")
+        out.data(row)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@payments_app.command("payables")
+def payments_payables(
+    status: Annotated[str, typer.Option(help="scheduled | partial | paid")] = "scheduled",
+) -> None:
+    """Partidas por pagar."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.payables import payables
+
+        rows = payables(ctx, status=status)
+        for r in rows:
+            out.line(
+                f"  #{r['invoice_id']:<6} {r['invoice']:<16} {r['supplier_ruc']} {r['currency']} "
+                f"{format_cents(r['pending_cents'])} el {r['scheduled_payment_date']}"
+            )
+        out.data(rows)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@payments_app.command("schedule")
+def payments_schedule(invoice_id: int) -> None:
+    """Programa el pago de una factura autorizada."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.payables import schedule_payment
+
+        result = schedule_payment(ctx, invoice_id)
+        out.line(json.dumps(result, ensure_ascii=False, default=_default))
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@payments_app.command("record")
+def payments_record(
+    invoice_id: int,
+    amount: Annotated[float, typer.Option(help="En la moneda del comprobante")],
+    paid_on: Annotated[str, typer.Option("--date", help="AAAA-MM-DD")],
+    reference: Annotated[str | None, typer.Option(help="Número de operación")] = None,
+) -> None:
+    """Registra un pago confirmado."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.payables import record_payment
+
+        try:
+            day = date.fromisoformat(paid_on)
+        except ValueError as error:
+            raise ConfigError("Usa la fecha AAAA-MM-DD") from error
+        result = record_payment(
+            ctx,
+            invoice_id=invoice_id,
+            amount_cents=round(amount * 100),
+            paid_on=day,
+            reference=reference,
+            source="manual",
+            created_by=ctx.reviewer,
+        )
+        out.line(f"Factura #{invoice_id}: {result['payment_status']}")
+        out.data(result)
         return ExitCode.OK
 
     _run(command)

@@ -38,6 +38,10 @@ MAX_DELIVERY_ATTEMPTS = 8
 
 #: Catálogo de eventos (documentación y validación de suscripciones).
 EVENT_TYPES = {
+    "invoice.received": "Llegó un comprobante y quedó registrado (acuse de recibo)",
+    "invoice.rejected": "Contabilidad rechazó el comprobante (con el motivo)",
+    "invoice.payment_scheduled": "Pago programado: fecha e importe neto (partida por pagar)",
+    "invoice.paid": "Pago confirmado (parcial o total)",
     "invoice.matched": "La factura coincide con su orden de compra (y recepción)",
     "invoice.match_exception": "La factura no coincide con su orden de compra",
     "invoice.note_applied": "Una nota de crédito o débito se aplicó a su factura",

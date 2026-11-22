@@ -43,7 +43,15 @@ from invoicebot.api.security import (
     principal_dependency,
     require,
 )
-from invoicebot.application import approvals, events, integrations, purchasing, review, tax
+from invoicebot.application import (
+    approvals,
+    events,
+    integrations,
+    payables,
+    purchasing,
+    review,
+    tax,
+)
 from invoicebot.application.companies import add_company
 from invoicebot.application.exchange_rates import save_exchange_rates
 from invoicebot.application.reports import build_export, check_month, find_duplicates
@@ -257,6 +265,22 @@ class SupplierStatusBody(BaseModel):
     good_taxpayer: bool | None = None
     retention_agent: bool | None = None
     perception_agent: bool | None = None
+
+
+class PaymentBody(BaseModel):
+    invoice_id: int | None = None
+    supplier_ruc: str | None = Field(default=None, pattern=r"^\d{11}$")
+    series: str | None = Field(default=None, max_length=10)
+    number: str | None = Field(default=None, max_length=20)
+    amount: Decimal = Field(gt=0, description="En la moneda del comprobante")
+    paid_on: date
+    reference: str | None = Field(default=None, max_length=60, description="Número de operación")
+
+
+class CostCenterBody(BaseModel):
+    code: str = Field(min_length=1, max_length=30)
+    name: str = Field(min_length=1, max_length=150)
+    destination_account: str | None = Field(default=None, max_length=20)
 
 
 class JobBody(BaseModel):
@@ -748,9 +772,11 @@ def create_app(context: AppContext | None = None) -> FastAPI:
 
     @app.post("/api/v1/invoices/{invoice_id}/reject", tags=["revisión"])
     def reject(invoice_id: int, body: RejectBody, principal: Reviewer) -> dict[str, Any]:
-        return review.reject_invoice(
+        result = review.reject_invoice(
             ctx.review_deps(), invoice_id, user=principal.signature, reason=body.reason
         )
+        ctx.after_review_rejected(invoice_id, body.reason)
+        return result
 
     @app.post("/api/v1/invoices/{invoice_id}/reopen", tags=["revisión"])
     def reopen(invoice_id: int, body: NoteBody, principal: Reviewer) -> dict[str, Any]:
@@ -1243,6 +1269,74 @@ def create_app(context: AppContext | None = None) -> FastAPI:
     @app.put("/api/v1/suppliers/{ruc}/tax-status", tags=["tributario"])
     def supplier_status(ruc: str, body: SupplierStatusBody, _: Reviewer) -> dict[str, Any]:
         return tax.set_supplier_status(ctx, ruc, **body.model_dump())
+
+    # --- Contabilidad y pagos ----------------------------------------------------------------
+
+    Treasury = Annotated[Principal, Depends(need(access.PAYMENTS_WRITE))]
+
+    @app.get("/api/v1/accounting/entries", tags=["contabilidad"], response_model=None)
+    def accounting_entries(
+        principal: Exporter,
+        month: Annotated[str, Query(pattern=r"^\d{4}-\d{2}$")],
+        format: Annotated[str, Query(pattern="^(json|csv|xlsx|concar)$")] = "json",
+    ) -> Response:
+        """Asientos de provisión (PCGE) de las facturas autorizadas del mes, para el ERP."""
+        lines = payables.journal(ctx, month=month, company_ids=principal.company_ids)
+        if format == "csv":
+            return Response(
+                payables.journal_csv(lines),
+                media_type="text/csv; charset=utf-8",
+                headers={"content-disposition": f'attachment; filename="asientos-{month}.csv"'},
+            )
+        if format in ("xlsx", "concar"):
+            return Response(
+                payables.journal_xlsx(lines, concar=format == "concar"),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={
+                    "content-disposition": f'attachment; filename="asientos-{month}-{format}.xlsx"'
+                },
+            )
+        return ApiResponse({"month": month, "lines": [line.__dict__ for line in lines]})
+
+    @app.post("/api/v1/cost-centers", tags=["contabilidad"], status_code=201)
+    def save_cost_center(body: CostCenterBody, _: Admin) -> dict[str, Any]:
+        return payables.add_cost_center(
+            ctx, code=body.code, name=body.name, destination_account=body.destination_account
+        )
+
+    @app.get("/api/v1/payables", tags=["pagos"])
+    def list_payables(
+        principal: Reader,
+        status: str | None = "scheduled",
+        until: date | None = None,
+    ) -> dict[str, Any]:
+        """Partidas por pagar (para bank-bot o tesorería)."""
+        return {
+            "items": payables.payables(
+                ctx, status=status or None, until=until, company_ids=principal.company_ids
+            )
+        }
+
+    @app.post("/api/v1/payments", tags=["pagos"], status_code=201)
+    def confirm_payment(body: PaymentBody, principal: Treasury) -> dict[str, Any]:
+        """Pago confirmado (bank-bot al conciliar el cargo). Idempotente por `reference`."""
+        if (
+            body.invoice_id is not None
+            and ctx.repository.get_invoice_detail(body.invoice_id) is None
+        ):
+            raise HTTPException(404, "No existe la factura")
+        return payables.record_payment(
+            ctx,
+            invoice_id=body.invoice_id,
+            supplier_ruc=body.supplier_ruc,
+            series=body.series,
+            number=body.number,
+            amount_cents=round(body.amount * 100),
+            paid_on=body.paid_on,
+            reference=body.reference,
+            source="bank-bot" if principal.kind == "api_key" else "manual",
+            created_by=principal.signature,
+        )
 
     # --- Webhooks y eventos ------------------------------------------------------------------
 

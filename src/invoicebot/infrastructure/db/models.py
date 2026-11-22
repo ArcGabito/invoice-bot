@@ -952,6 +952,12 @@ class Invoice(Base):
     accounting_source: Mapped[str | None] = mapped_column(Unicode(12))
     applied_to_invoice_id: Mapped[int | None] = mapped_column(Integer)
 
+    # Migración 010
+    payment_status: Mapped[str | None] = mapped_column(Unicode(12))
+    scheduled_payment_date: Mapped[datetime.date | None] = mapped_column(Date)
+    payable_cents: Mapped[int | None] = mapped_column(BigInteger)
+    paid_cents: Mapped[int | None] = mapped_column(BigInteger)
+
     @property
     def label(self) -> str:
         return f"{self.series or '?'}-{self.number or '?'}"
@@ -1279,3 +1285,28 @@ class SupplierTaxStatus(Base):
     perception_agent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     source: Mapped[str] = mapped_column(Unicode(20), nullable=False, default="manual")
     updated_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False, default=utcnow)
+
+
+# --- Migración 010: contabilidad y pagos -----------------------------------------------
+
+
+class CostCenter(Base):
+    __tablename__ = "cost_centers"
+
+    code: Mapped[str] = mapped_column(Unicode(30), primary_key=True)
+    name: Mapped[str] = mapped_column(Unicode(150), nullable=False)
+    destination_account: Mapped[str | None] = mapped_column(Unicode(20))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(start=1, increment=1), primary_key=True)
+    invoice_id: Mapped[int] = mapped_column(Integer, ForeignKey("invoices.id"))
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    paid_on: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    reference: Mapped[str | None] = mapped_column(Unicode(60))
+    source: Mapped[str] = mapped_column(Unicode(20), nullable=False, default="manual")
+    created_by: Mapped[str | None] = mapped_column(Unicode(150))
+    created_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False, default=utcnow)

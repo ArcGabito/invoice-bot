@@ -129,17 +129,17 @@ Cada actor es **idempotente**: recibe un identificador, no el documento, y vuelv
 
 **Hecho cuando**: el cuadre del mes contra el SIRE sale en un comando o una llamada a la API y lista cada diferencia con su comprobante (`tests/integration/test_tax.py`).
 
-## Fase 4: Contabilidad, pagos e integración
+## Fase 4: Contabilidad, pagos e integración ✅
 
 **Objetivo**: que lo aprobado se contabilice y se pague sin volver a digitarlo.
 
-- [ ] **Asiento de provisión** según el PCGE (60/40/42 y sus subcuentas, destino 9x por centro de costo), exportable al ERP: formato genérico CSV/Excel, plantillas para Concar y Siscont y API para Vortex ERP u Odoo.
-- [ ] **Programación de pagos** según la condición de pago y el vencimiento. Las facturas aprobadas se envían a **bank-bot** como partidas por pagar.
-- [ ] Al confirmarse el pago en el extracto, bank-bot devuelve `payment.confirmed` y la factura pasa a **pagada**.
-- [ ] **Webhooks firmados** (HMAC-SHA256, reintentos y reenvío manual) con formato CloudEvents: `invoice.received`, `invoice.approved`, `invoice.rejected`, `invoice.paid`.
-- [ ] **Avisos a proveedores** vía email-bot: acuse de recibo, rechazo con motivo y fecha programada de pago.
+- [x] **Asiento de provisión** según el PCGE (60/63, 40111, 4212 y el destino 9x/79 por centro de costo), cuadrado también en moneda extranjera. Exportación CSV, Excel y plantilla tipo Concar; API JSON para el ERP (Vortex ERP, Odoo). *Pendiente*: la plantilla de Siscont.
+- [x] **Programación de pagos** por vencimiento o condición de pago, con el neto de retención, detracción y notas de crédito. Se publica a **bank-bot** como partida por pagar (`invoice.payment_scheduled`, `GET /api/v1/payables`).
+- [x] bank-bot confirma el pago (`POST /api/v1/payments`, idempotente) y la factura pasa a **pagada** (`invoice.paid`).
+- [x] **Webhooks firmados** (hechos en la Fase 2) con los eventos `invoice.received`, `invoice.rejected`, `invoice.payment_scheduled` e `invoice.paid`.
+- [x] **Avisos a proveedores**: los eventos llevan el correo de origen del comprobante para que email-bot envíe el acuse, el rechazo con motivo y la fecha de pago.
 
-**Hecho cuando**: una factura aprobada aparece en la propuesta de pago de bank-bot y, tras pagarse, vuelve marcada como pagada sin intervención manual.
+**Hecho cuando**: una factura aprobada aparece como partida por pagar y, al confirmarse su pago, queda pagada sin intervención manual (`tests/integration/test_payables.py`).
 
 ## Fase 5: Portal de proveedores, antifraude y analítica
 
