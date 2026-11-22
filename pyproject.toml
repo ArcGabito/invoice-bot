@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "invoicebot"
-version = "1.0.0"
+version = "1.1.0"
 description = "Bot RPA de comprobantes peruanos: XML UBL, PDF, OCR e IA, validación contable, SUNAT, SQL Server y API FastAPI"
 readme = "README.md"
 license = "MIT"
@@ -26,6 +26,11 @@ dependencies = [
   "httpx>=0.28",
   "jinja2>=3.1",
   "openpyxl>=3.1",
+  "opentelemetry-exporter-otlp-proto-http>=1.30",
+  "opentelemetry-instrumentation-fastapi>=0.51b0",
+  "opentelemetry-instrumentation-httpx>=0.51b0",
+  "opentelemetry-instrumentation-sqlalchemy>=0.51b0",
+  "opentelemetry-sdk>=1.30",
   "pillow>=12.0",
   "pydantic>=2.12",
   "pyjwt[crypto]>=2.10",

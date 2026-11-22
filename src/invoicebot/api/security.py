@@ -172,6 +172,13 @@ async def principal_dependency(request: Request) -> Principal:
     from starlette.concurrency import run_in_threadpool
 
     principal = await run_in_threadpool(authenticate_request, request)
+    limiter = request.app.state.context.api_limiter(principal.signature)
+    if limiter is not None and not await run_in_threadpool(limiter.try_acquire):
+        raise HTTPException(
+            429,
+            f"Límite de {limiter.per_minute} peticiones por minuto: vuelve a intentarlo en un momento",
+            headers={"Retry-After": "60"},
+        )
     COMPANY_SCOPE.set(principal.company_ids)
     ACTOR.set(principal.signature)
     return principal

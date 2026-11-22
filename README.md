@@ -10,7 +10,7 @@ InvoiceBot recibe facturas, boletas y notas desde una carpeta, el correo o su AP
 
 **El problema que resuelve**: en un área contable, registrar cada comprobante de proveedor a mano (descargarlo del correo, teclear RUC, serie, importes, validar en SUNAT, calcular la detracción, convertir dólares) toma minutos por documento y es donde se cuelan los errores que luego observa SUNAT: facturas anuladas, RUC no habidos, IGV mal calculado, duplicados pagados dos veces.
 
-## Estado: v1.0.0 (Python)
+## Estado: v1.1.0
 
 La versión 1.0 es la migración completa a Python de la 0.6 (Node.js, etiqueta `v0.6.0-node`). Mismas reglas, mismos comandos, mismas variables de entorno y **mismo esquema de base de datos**: una instalación existente se actualiza sin perder datos ni contraseñas de usuarios.
 
@@ -36,6 +36,7 @@ La versión 1.0 es la migración completa a Python de la 0.6 (Node.js, etiqueta 
 | **Cuentas por pagar**: órdenes de compra, match a 2 y 3 vías, notas aplicadas, matriz de aprobación con enlace de un clic y webhooks firmados ([guía](docs/cuentas-por-pagar.md)) | ✅ 1.1 |
 | **Contabilidad y pagos**: asiento PCGE (CSV, Excel, Concar), programación del pago neto, pagos confirmados por bank-bot y avisos al proveedor ([guía](docs/cuentas-por-pagar.md#5-contabilidad-y-pagos)) | ✅ 1.1 |
 | **Portal de proveedores** con enlace mágico, **antifraude** e **indicadores** para Power BI ([guía](docs/portal-y-antifraude.md)) | ✅ 1.1 |
+| **Operación**: OpenTelemetry, límites por clave, alertas, Dependabot, Trivy, SBOM y runbooks ([guía](docs/operacion.md)) | ✅ 1.1 |
 | **Cumplimiento tributario**: cuadre con la propuesta del SIRE, reverificación antes del cierre, detracciones, retenciones y plazo del crédito fiscal ([guía](docs/cumplimiento-tributario.md)) | ✅ 1.1 |
 | **uv** (`uv.lock`) para dependencias reproducibles en desarrollo, Docker y CI | ✅ 1.1 |
 

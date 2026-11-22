@@ -147,14 +147,15 @@ Cada actor es **idempotente**: recibe un identificador, no el documento, y vuelv
 - [x] **Antifraude**: proveedor nuevo con monto alto, importe fuera del rango histórico y duplicados difusos. Son advertencias que impiden la aprobación automática y publican `invoice.fraud_alert`. El cambio de cuenta bancaria lo cubre bank-bot y el RUC dado de baja, la verificación en SUNAT.
 - [x] **Indicadores**: procesamiento sin intervención (STP), tiempos de ciclo, costo de IA por comprobante y comprobantes observados, en la API, la CLI y la vista `v_invoice_lifecycle` para Power BI. *Pendiente*: un panel gráfico propio (la vista alimenta Power BI).
 
-## Fase 6: Producción a escala
+## Fase 6: Producción a escala ✅
 
-- [ ] **Observabilidad**: OpenTelemetry en FastAPI, Dramatiq, httpx y SQL. Se envía a Azure Monitor o, en un VPS, a Grafana (Prometheus, Loki y Tempo). Alertas por cola creciendo, DLQ mayor que 0, edad del mensaje más antiguo y errores de IA o SUNAT.
-- [ ] **SLO**: p95 de la API, tiempo desde la recepción hasta el comprobante validado y porcentaje de trabajos fallidos.
-- [ ] **Alta disponibilidad y recuperación**: API con 2 o más réplicas, Redis con persistencia y réplica (Azure Managed Redis con alta disponibilidad), Azure SQL con redundancia de zona o SQL Server con copias probadas, y un runbook de recuperación con RPO y RTO definidos.
-- [ ] **Despliegues sin cortes**: revisiones de Container Apps con división de tráfico (blue/green) y, en el VPS, actualización gradual con healthchecks. Las migraciones corren siempre como job previo.
-- [ ] **Seguridad continua**: Dependabot o Renovate para `uv.lock`, Trivy y SBOM por versión, revisión con OWASP ASVS nivel 2 y secretos solo en Key Vault o Docker secrets.
-- [ ] **Pruebas de carga** con k6 o Locust: 10 000 comprobantes por día por empresa como referencia.
+- [x] **Observabilidad**: OpenTelemetry opcional (FastAPI, httpx, SQL y un span por trabajo, con `trace_id` en los logs) hacia Azure Monitor o Grafana mediante OTLP. Reglas de alerta de Prometheus para la cola, la DLQ, los trabajos fallidos y los webhooks.
+- [x] **SLO** definidos y medibles (`docs/operacion.md`).
+- [x] **Alta disponibilidad y recuperación**: tabla de RPO y RTO por componente, prueba trimestral de restauración y runbooks (API caída, cola creciendo, mensajes muertos, trabajos fallidos, webhooks).
+- [x] **Despliegues sin cortes**: revisiones de Container Apps con migración previa y actualización gradual en el VPS.
+- [x] **Seguridad continua**: Dependabot para `uv.lock`, Docker y Actions; Trivy (informativo por ahora) y SBOM SPDX en el CI; resumen de OWASP ASVS nivel 2; límite de peticiones por clave en Redis (pendiente de la Fase 1).
+- [x] **Pruebas de carga**: `deploy/load/k6-api.js` con umbrales de p95.
+- [x] Prueba de humo con **IA real** (Ollama `qwen3.5:4b`): un PDF sin XML se extrajo y validó sin incidencias.
 
 ---
 

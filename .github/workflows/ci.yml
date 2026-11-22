@@ -107,6 +107,21 @@ jobs:
         run: touch .env && REDIS_PASSWORD=x MSSQL_SA_PASSWORD=x INVOICEBOT_DOMAIN=example.com docker compose --profile sql --profile proxy --profile tools config --quiet
       - name: La plantilla de Azure (Bicep) compila
         run: az bicep build --file deploy/azure/main.bicep --stdout > /dev/null
+      # Vulnerabilidades con parche disponible en la imagen (informativo: no bloquea todavía;
+      # pásalo a exit-code 1 cuando la línea base esté limpia).
+      - name: Escaneo de vulnerabilidades (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: invoicebot:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: invoicebot:ci
+          format: spdx-json
+          artifact-name: invoicebot-sbom.spdx.json
 
   # Imagen publicada en GHCR para Azure Container Apps y para los VPS (solo en main).
   publish:

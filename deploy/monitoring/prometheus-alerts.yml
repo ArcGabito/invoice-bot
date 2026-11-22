@@ -1,0 +1,49 @@
+# Reglas de alerta de Prometheus para InvoiceBot (métricas de GET /metrics).
+# Configura el scrape con una clave de API de lectura:
+#   - job_name: invoicebot
+#     scheme: https
+#     authorization: { credentials: "ibk_…" }
+#     static_configs: [{ targets: ["facturas.empresa.pe"] }]
+groups:
+  - name: invoicebot
+    rules:
+      - alert: InvoiceBotDown
+        expr: up{job="invoicebot"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: La API de InvoiceBot no responde
+          runbook: docs/operacion.md#la-api-no-responde
+
+      - alert: InvoiceBotQueueBacklog
+        # Un trabajo listo lleva más de 15 minutos esperando: faltan workers o están caídos.
+        expr: invoicebot_job_oldest_wait_seconds > 900
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Trabajos esperando más de 15 minutos ({{ $value | humanizeDuration }})"
+          runbook: docs/operacion.md#la-cola-crece
+
+      - alert: InvoiceBotDeadLetters
+        expr: sum(invoicebot_queue_messages{state="dead"}) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Hay mensajes muertos en Redis (fallos de infraestructura agotados)
+          runbook: docs/operacion.md#mensajes-muertos
+
+      - alert: InvoiceBotJobsFailing
+        expr: sum(invoicebot_jobs{status="failed"}) > 10
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} trabajos fallidos en las últimas 24 h"
+          runbook: docs/operacion.md#trabajos-fallidos
+
+      - alert: InvoiceBotWebhooksFailing
+        expr: sum(invoicebot_jobs{task="webhooks.deliver",status="failed"}) > 0
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: Entregas de webhooks agotaron sus reintentos (¿email-bot o bank-bot caídos?)
+          runbook: docs/operacion.md#webhooks

@@ -63,6 +63,12 @@ class RateLimiter:
                 return True
             return False
 
+    def try_acquire(self) -> bool:
+        """Toma un hueco sin esperar (False si no hay)."""
+        if self.per_minute <= 0:
+            return True
+        return self._try()
+
     def _try(self) -> bool:
         if self._limiter is None:
             return self._try_local()

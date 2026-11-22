@@ -2289,6 +2289,9 @@ def worker(
         unknown = [q for q in selected if q not in QUEUES]
         if unknown:
             raise ConfigError(f"Colas desconocidas: {', '.join(unknown)} (usa {', '.join(QUEUES)})")
+        from invoicebot.infrastructure import telemetry
+
+        telemetry.setup("worker")
         _wait_for_schema(ctx, out)
         # Se crean ahora, en el hilo principal: los hilos del worker los comparten.
         jobs = ctx.jobs
@@ -2318,7 +2321,9 @@ def scheduler(
 
     def command(ctx: AppContext, out: Out) -> int:
         from invoicebot.application.scheduler import run_scheduler
+        from invoicebot.infrastructure import telemetry
 
+        telemetry.setup("scheduler")
         _wait_for_schema(ctx, out)
         typer.echo(f"InvoiceBot {__version__}: programador ({ctx.queue.ping()})", err=True)
         run_scheduler(ctx, interval_s=interval)

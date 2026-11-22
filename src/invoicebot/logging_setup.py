@@ -53,7 +53,10 @@ def configure_logging(config: LogConfig, *, verbose: bool = False) -> logging.Lo
         logger.removeHandler(handler)
         handler.close()
 
+    from invoicebot.infrastructure.telemetry import TraceContextFilter
+
     console = logging.StreamHandler(sys.stderr)
+    console.addFilter(TraceContextFilter())
     console.setLevel(level)
     console.setFormatter(
         JsonFormatter()

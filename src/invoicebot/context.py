@@ -72,7 +72,11 @@ class AppContext:
 
     @cached_property
     def db(self) -> Database:
-        return Database.from_config(self.config.db, self.config.env)
+        from invoicebot.infrastructure import telemetry
+
+        database = Database.from_config(self.config.db, self.config.env)
+        telemetry.setup("app", engine=database.engine)
+        return database
 
     def ensure_schema(self, *, migrate: bool | None = None) -> MigrationResult | None:
         """Aplica las migraciones pendientes (con copia previa) una vez por proceso.
@@ -326,6 +330,19 @@ class AppContext:
             {"document_id": document_id},
             dedupe_key=f"documents.process:{document_id}",
         )
+
+    def api_limiter(self, who: str) -> RateLimiter | None:
+        """Límite de peticiones por minuto de una clave de API o persona (None = sin límite)."""
+        from invoicebot.infrastructure.queue import RateLimiter
+
+        per_minute = int(self.config.env.get("INVOICEBOT_API_RATE_PER_MINUTE") or 0)
+        if per_minute <= 0:
+            return None
+        key = f"{self.config.queue.namespace}:rate:api:{who}"
+        with self._limiters_lock:
+            if key not in self._limiters:
+                self._limiters[key] = RateLimiter(key, per_minute, redis_client=self.redis)
+            return self._limiters[key]
 
     def rate_limiter(self, name: str) -> RateLimiter:
         """Límite de llamadas por minuto compartido por todos los workers (`ai` o `sunat`)."""
