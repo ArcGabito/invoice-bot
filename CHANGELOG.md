@@ -2,10 +2,13 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
 
-## [Sin publicar]
+## [1.1.0] - 2026-11-22
+
+Plataforma empresarial: colas, multiempresa, cuentas por pagar de punta a punta, cumplimiento tributario, portal de proveedores y operación en producción. Plan completo en [ROADMAP.md](ROADMAP.md).
 
 ### Añadido
 
+- **Operación en producción** ([guía](docs/operacion.md)): trazas OpenTelemetry opcionales (FastAPI, httpx, SQL Server y un span por trabajo, con `trace_id` en los logs JSON), límite de peticiones por clave o persona (`INVOICEBOT_API_RATE_PER_MINUTE`, 429 con `Retry-After`), reglas de alerta de Prometheus, Dependabot (uv, Docker, Actions), Trivy y SBOM SPDX en el CI, prueba de carga k6 y runbooks con SLO, RPO y RTO.
 - **Colas con Redis (Dramatiq)**: el trabajo se reparte en tareas (`inbox.collect`, `documents.scan`, `documents.process`, `documents.retry`, `fx.fetch`, `sunat.verify`, `exports.monthly`, `db.backup`, `jobs.purge` y `bot.cycle`) en cuatro colas (`ingest`, `extract`, `sunat`, `default`). Nuevos comandos `invoicebot worker` (varias réplicas se reparten la cola), `invoicebot enqueue`, `invoicebot tasks` e `invoicebot jobs list|show|retry|cancel|run`.
 - **Tabla `jobs`** (migración `006_jobs_and_schedules`): SQL Server es la fuente de verdad de cada trabajo (intentos, resultado, error, trabajo padre). Reintentos con espera exponencial (15 s, 30 s, 1 min… hasta 1 h), errores permanentes sin reintento, deduplicación mientras el trabajo está activo (`documents.process:<id>`) y claves de idempotencia.
 - **Programador**: `invoicebot scheduler` (VPS) o `invoicebot schedule tick` (Container Apps Job, tarea de Windows) con expresiones cron en la zona de la empresa (`INVOICEBOT_SCHEDULE_COLLECT`, `_FX`, `_SUNAT`, `_RETRY`, `_EXPORT`, `_BACKUP`, `_PURGE`, `_CYCLE`). Tabla `schedules`; `schedule list|set|enable|disable`. Republica los trabajos que quedaron sin enviar (Redis caído) y los reintentos vencidos.

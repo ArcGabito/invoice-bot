@@ -247,8 +247,19 @@ class Jobs:
         actor_token = ACTOR.set(f"job:{spec.name}#{job_id}")
         log_extra = {"job_id": job_id, "task": spec.name, "attempt": job["attempts"]}
         self.logger.info("inicio del trabajo %s #%s", spec.name, job_id, extra=log_extra)
+        from invoicebot.infrastructure.telemetry import span
+
         try:
-            result = spec.handler(self.context, payload if isinstance(payload, dict) else {})
+            with span(
+                f"job {spec.name}",
+                **{
+                    "job.id": job_id,
+                    "job.task": spec.name,
+                    "job.queue": spec.queue,
+                    "job.attempt": int(job["attempts"]),
+                },
+            ):
+                result = spec.handler(self.context, payload if isinstance(payload, dict) else {})
         except RetryLater as wait:
             self.repository.defer(job_id, later(wait.delay_s), wait.message)
             # defer devuelve el intento: el trabajo queda con uno menos.

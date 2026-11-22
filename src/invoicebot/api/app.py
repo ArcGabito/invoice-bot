@@ -346,6 +346,10 @@ def create_app(context: AppContext | None = None) -> FastAPI:
     )
     app.state.context = ctx
     app.state.throttle = LoginThrottle()
+    from invoicebot.infrastructure import telemetry
+
+    if telemetry.setup("api", app=app):
+        ctx.logger.info("OpenTelemetry activo (OTEL_EXPORTER_OTLP_ENDPOINT)")
     app.state.run_thread = None
     app.add_middleware(SecurityHeaders)
     app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
