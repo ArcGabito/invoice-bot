@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,7 +21,11 @@ class PdfText:
 #: Glifos sin equivalente Unicode (U+0000, U+FFFE, U+FFFD). Algunos generadores
 #: (p. ej. las facturas hechas con Stripe, como las de Cloudflare) no declaran el
 #: texto de guiones ni paréntesis: "IN-45946823" llegaba como "IN\x0045946823".
-_UNMAPPED = "\x00￾�"
+_UNMAPPED = "\x00\ufffe\ufffd"
+#: PDFium no es seguro entre hilos: cada uso va bajo este candado (con varios hilos
+#: a la vez termina en un fallo de segmentación).
+_PDFIUM_LOCK = threading.RLock()
+
 _BETWEEN_ALNUM = re.compile(rf"(?<=[^\W_])[{_UNMAPPED}]+(?=[^\W_])")
 
 
@@ -46,6 +51,11 @@ def _open(path: str) -> Any:
 
 def extract_pdf_text(path: str) -> PdfText:
     """Texto de todas las páginas, línea a línea, separando páginas con una línea en blanco."""
+    with _PDFIUM_LOCK:
+        return _extract_pdf_text(path)
+
+
+def _extract_pdf_text(path: str) -> PdfText:
     pdf = _open(path)
     try:
         pages: list[str] = []
@@ -68,6 +78,11 @@ def extract_pdf_text(path: str) -> PdfText:
 
 def render_pdf_pages(path: str, *, max_pages: int = 3, scale: float = 3.0) -> tuple[list[Any], int]:
     """Imágenes PIL de las primeras `max_pages` páginas (escala 3 ≈ 216 ppp) y total de páginas."""
+    with _PDFIUM_LOCK:
+        return _render_pdf_pages(path, max_pages=max_pages, scale=scale)
+
+
+def _render_pdf_pages(path: str, *, max_pages: int, scale: float) -> tuple[list[Any], int]:
     pdf = _open(path)
     try:
         images = []

@@ -64,6 +64,7 @@ var sqlServerName = '${name}-sql-${suffix}'
 var shareName = 'invoicebot'
 var sqlHost = deploySql ? '${sqlServerName}${environment().suffixes.sqlServerHostname}' : existingSqlServer
 var secretEntries = [for item in items(extraSecrets): { name: toLower(replace(item.key, '_', '-')), value: item.value }]
+var secretEnv = [for item in items(extraSecrets): { name: toUpper(item.key), secretRef: toLower(replace(item.key, '_', '-')) }]
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: '${name}-logs'
@@ -198,7 +199,7 @@ var env = concat(
     { name: 'INVOICEBOT_LOG_FORMAT', value: 'json' }
   ],
   empty(anthropicApiKey) ? [] : [{ name: 'ANTHROPIC_API_KEY', secretRef: 'anthropic-api-key' }],
-  [for item in items(extraSecrets): { name: toUpper(item.key), secretRef: toLower(replace(item.key, '_', '-')) }],
+  secretEnv,
   extraEnv
 )
 
