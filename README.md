@@ -35,6 +35,7 @@ La versión 1.0 es la migración completa a Python de la 0.6 (Node.js, etiqueta 
 | **Multiempresa** con Row-Level Security, **roles**, **inicio de sesión con Microsoft o Google** y auditoría de cambios ([guía](docs/seguridad-y-empresas.md)) | ✅ 1.1 |
 | **Cuentas por pagar**: órdenes de compra, match a 2 y 3 vías, notas aplicadas, matriz de aprobación con enlace de un clic y webhooks firmados ([guía](docs/cuentas-por-pagar.md)) | ✅ 1.1 |
 | **Contabilidad y pagos**: asiento PCGE (CSV, Excel, Concar), programación del pago neto, pagos confirmados por bank-bot y avisos al proveedor ([guía](docs/cuentas-por-pagar.md#5-contabilidad-y-pagos)) | ✅ 1.1 |
+| **Portal de proveedores** con enlace mágico, **antifraude** e **indicadores** para Power BI ([guía](docs/portal-y-antifraude.md)) | ✅ 1.1 |
 | **Cumplimiento tributario**: cuadre con la propuesta del SIRE, reverificación antes del cierre, detracciones, retenciones y plazo del crédito fiscal ([guía](docs/cumplimiento-tributario.md)) | ✅ 1.1 |
 | **uv** (`uv.lock`) para dependencias reproducibles en desarrollo, Docker y CI | ✅ 1.1 |
 

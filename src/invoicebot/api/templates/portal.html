@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Portal de proveedores</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login">
+  <main class="login-card portal">
+    <h1>Portal de proveedores</h1>
+    {% if supplier %}
+      <p class="muted">RUC {{ supplier[0] }} · {{ supplier[1] }} · <a href="#" id="logout">Salir</a></p>
+      <form id="upload-form">
+        <label>Sube tus comprobantes (XML y PDF)
+          <input type="file" name="files" multiple accept=".xml,.pdf" required>
+        </label>
+        <button type="submit" class="primary">Enviar</button>
+        <p id="upload-status" role="status"></p>
+      </form>
+      <table id="invoices">
+        <thead><tr><th>Comprobante</th><th>Emisión</th><th>Importe</th><th>Estado</th><th>Pago</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    {% else %}
+      <p class="muted">Consulta el estado de tus facturas y la fecha de pago. Te enviaremos un enlace de acceso al correo con el que nos envías tus comprobantes.</p>
+      <form id="login-form">
+        <label>RUC <input name="ruc" inputmode="numeric" pattern="\d{11}" required maxlength="11"></label>
+        <label>Correo <input name="email" type="email" required maxlength="254"></label>
+        <button type="submit" class="primary">Enviarme el enlace</button>
+        <p id="login-status" role="status"></p>
+      </form>
+    {% endif %}
+  </main>
+  <script src="/static/portal.js"></script>
+</body>
+</html>

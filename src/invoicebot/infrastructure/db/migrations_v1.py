@@ -531,4 +531,64 @@ M010 = Migration(
     ),
 )
 
-V1_MIGRATIONS = (M005, M006, M007, M008, M009, M010)
+#: Portal de proveedores (enlace mágico por correo), subidas del portal e indicadores del
+#: ciclo de cuentas por pagar (vista para Power BI).
+M011 = Migration(
+    11,
+    "011_supplier_portal_kpis",
+    (
+        f"""CREATE TABLE supplier_contacts (
+      id           INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_supplier_contacts PRIMARY KEY,
+      supplier_ruc NVARCHAR(11)  NOT NULL,
+      email        NVARCHAR(254) NOT NULL,
+      -- manual | mail (aprendido del correo de origen de sus comprobantes)
+      source       NVARCHAR(10)  NOT NULL CONSTRAINT df_supplier_contacts_source DEFAULT N'manual',
+      active       BIT           NOT NULL CONSTRAINT df_supplier_contacts_active DEFAULT 1,
+      created_at   DATETIME2(3)  NOT NULL {_NOW.format("supplier_contacts")},
+      CONSTRAINT uq_supplier_contacts UNIQUE (supplier_ruc, email)
+    )""",
+        f"""CREATE TABLE portal_tokens (
+      token_hash   BINARY(32)    NOT NULL CONSTRAINT pk_portal_tokens PRIMARY KEY,
+      -- link: enlace de un solo uso enviado por correo · session: sesión del navegador
+      kind         NVARCHAR(10)  NOT NULL CONSTRAINT ck_portal_tokens_kind CHECK (kind IN (N'link', N'session')),
+      supplier_ruc NVARCHAR(11)  NOT NULL,
+      email        NVARCHAR(254) NOT NULL,
+      expires_at   DATETIME2(3)  NOT NULL,
+      used_at      DATETIME2(3)  NULL,
+      created_at   DATETIME2(3)  NOT NULL {_NOW.format("portal_tokens")}
+    )""",
+        "CREATE INDEX ix_portal_tokens_expires ON portal_tokens (expires_at)",
+        f"""CREATE TABLE portal_uploads (
+      id           INT IDENTITY(1, 1) NOT NULL CONSTRAINT pk_portal_uploads PRIMARY KEY,
+      supplier_ruc NVARCHAR(11)  NOT NULL,
+      email        NVARCHAR(254) NOT NULL,
+      folder       NVARCHAR(1024) NOT NULL,
+      files        INT           NOT NULL,
+      job_id       BIGINT        NULL,
+      created_at   DATETIME2(3)  NOT NULL {_NOW.format("portal_uploads")}
+    )""",
+        # Una fila por factura con las fechas del ciclo: recepción, revisión, autorización y
+        # pago. Respeta la Row-Level Security de `invoices` (Power BI ve lo que su usuario ve).
+        """CREATE VIEW v_invoice_lifecycle AS
+    SELECT i.id AS invoice_id, i.company_id, i.supplier_ruc, i.supplier_name, i.document_type,
+      i.series, i.number, i.issue_date, i.currency, i.total_cents,
+      CAST(i.total_cents / 100.0 AS DECIMAL(18, 2)) AS total,
+      i.validation_status, i.review_status, i.approval_status, i.payment_status,
+      d.created_at AS received_at, i.reviewed_at, i.reviewed_by,
+      (SELECT MIN(c.changed_at) FROM invoice_changes c
+        WHERE c.invoice_id = i.id AND c.approval_status IN (N'approved', N'not_required')) AS authorized_at,
+      (SELECT MAX(p.paid_on) FROM payments p WHERE p.invoice_id = i.id) AS last_payment_on,
+      CASE WHEN i.reviewed_by = N'invoicebot:match'
+        AND NOT EXISTS (SELECT 1 FROM approval_requests r
+                        WHERE r.invoice_id = i.id AND r.approver <> N'invoicebot:match')
+        THEN 1 ELSE 0 END AS straight_through,
+      (SELECT COALESCE(SUM(CAST(e.input_tokens AS BIGINT)), 0) FROM extraction_runs e
+        WHERE e.document_id = i.document_id) AS input_tokens,
+      (SELECT COALESCE(SUM(CAST(e.output_tokens AS BIGINT)), 0) FROM extraction_runs e
+        WHERE e.document_id = i.document_id) AS output_tokens,
+      i.data_source, i.sunat_status
+    FROM invoices i JOIN documents d ON d.id = i.document_id""",
+    ),
+)
+
+V1_MIGRATIONS = (M005, M006, M007, M008, M009, M010, M011)

@@ -1310,3 +1310,71 @@ class Payment(Base):
     source: Mapped[str] = mapped_column(Unicode(20), nullable=False, default="manual")
     created_by: Mapped[str | None] = mapped_column(Unicode(150))
     created_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False, default=utcnow)
+
+
+# --- Migración 011: portal de proveedores -------------------------------------------------
+
+
+class SupplierContact(Base):
+    __tablename__ = "supplier_contacts"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(start=1, increment=1), primary_key=True)
+    supplier_ruc: Mapped[str] = mapped_column(Unicode(11), nullable=False)
+    email: Mapped[str] = mapped_column(Unicode(254), nullable=False)
+    source: Mapped[str] = mapped_column(Unicode(10), nullable=False, default="manual")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False, default=utcnow)
+
+
+class PortalToken(Base):
+    __tablename__ = "portal_tokens"
+
+    token_hash: Mapped[bytes] = mapped_column(BINARY(32), primary_key=True)
+    kind: Mapped[str] = mapped_column(Unicode(10), nullable=False)
+    supplier_ruc: Mapped[str] = mapped_column(Unicode(11), nullable=False)
+    email: Mapped[str] = mapped_column(Unicode(254), nullable=False)
+    expires_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False)
+    used_at: Mapped[datetime.datetime | None] = mapped_column(DATETIME2)
+    created_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False, default=utcnow)
+
+
+class PortalUpload(Base):
+    __tablename__ = "portal_uploads"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(start=1, increment=1), primary_key=True)
+    supplier_ruc: Mapped[str] = mapped_column(Unicode(11), nullable=False)
+    email: Mapped[str] = mapped_column(Unicode(254), nullable=False)
+    folder: Mapped[str] = mapped_column(Unicode(1024), nullable=False)
+    files: Mapped[int] = mapped_column(Integer, nullable=False)
+    job_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False, default=utcnow)
+
+
+V_INVOICE_LIFECYCLE = Table(
+    "v_invoice_lifecycle",
+    Base.metadata,
+    Column("invoice_id", Integer),
+    Column("company_id", Integer),
+    Column("supplier_ruc", Unicode(11)),
+    Column("supplier_name", Unicode(300)),
+    Column("document_type", Unicode(2)),
+    Column("series", Unicode(10)),
+    Column("number", Unicode(20)),
+    Column("issue_date", Date),
+    Column("currency", Unicode(3)),
+    Column("total_cents", BigInteger),
+    Column("validation_status", Unicode(10)),
+    Column("review_status", Unicode(10)),
+    Column("approval_status", Unicode(12)),
+    Column("payment_status", Unicode(12)),
+    Column("received_at", DATETIME2),
+    Column("reviewed_at", DATETIME2),
+    Column("reviewed_by", Unicode(100)),
+    Column("authorized_at", DATETIME2),
+    Column("last_payment_on", Date),
+    Column("straight_through", Integer),
+    Column("input_tokens", BigInteger),
+    Column("output_tokens", BigInteger),
+    Column("data_source", Unicode(10)),
+    Column("sunat_status", Unicode(30)),
+)

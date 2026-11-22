@@ -141,11 +141,11 @@ Cada actor es **idempotente**: recibe un identificador, no el documento, y vuelv
 
 **Hecho cuando**: una factura aprobada aparece como partida por pagar y, al confirmarse su pago, queda pagada sin intervención manual (`tests/integration/test_payables.py`).
 
-## Fase 5: Portal de proveedores, antifraude y analítica
+## Fase 5: Portal de proveedores, antifraude y analítica ✅
 
-- [ ] **Portal de proveedores**: el proveedor entra con un enlace mágico por correo, sube XML y PDF, y consulta el estado y la fecha de pago. Así bajan las consultas de "¿cuándo me pagan?".
-- [ ] **Antifraude**: alertas de proveedor nuevo con montos altos, cambio de cuenta bancaria (lo coordina bank-bot), precio fuera de rango histórico, duplicados difusos (mismo importe y fecha con serie distinta) y comprobantes de RUC con baja reciente.
-- [ ] **Indicadores**: STP, tiempo de ciclo de recepción a aprobación y a pago, costo de IA por comprobante, comprobantes observados por SUNAT y duplicados evitados. Se exponen en vistas SQL para Power BI (amplían `v_invoices`) y en un panel en la propia API.
+- [x] **Portal de proveedores**: enlace mágico por correo (sin enumerar contactos), subida de XML y PDF, y consulta del estado y la fecha de pago. Los contactos se aprenden del correo de origen.
+- [x] **Antifraude**: proveedor nuevo con monto alto, importe fuera del rango histórico y duplicados difusos. Son advertencias que impiden la aprobación automática y publican `invoice.fraud_alert`. El cambio de cuenta bancaria lo cubre bank-bot y el RUC dado de baja, la verificación en SUNAT.
+- [x] **Indicadores**: procesamiento sin intervención (STP), tiempos de ciclo, costo de IA por comprobante y comprobantes observados, en la API, la CLI y la vista `v_invoice_lifecycle` para Power BI. *Pendiente*: un panel gráfico propio (la vista alimenta Power BI).
 
 ## Fase 6: Producción a escala
 

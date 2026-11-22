@@ -52,6 +52,8 @@ EVENT_TYPES = {
     "invoice.payment_rejected": "La factura fue rechazada en la aprobación",
     "tax.annotation_deadline": "Un comprobante está cerca de perder el crédito fiscal",
     "detraction.pending": "Una factura autorizada tiene la detracción sin depositar",
+    "invoice.fraud_alert": "Señales de posible fraude o duplicado (revisar antes de pagar)",
+    "portal.login_link": "Enlace de acceso al portal de proveedores (enviar por correo)",
 }
 
 

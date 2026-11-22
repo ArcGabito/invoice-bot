@@ -2183,6 +2183,43 @@ def payments_record(
     _run(command)
 
 
+# --- Portal e indicadores ------------------------------------------------------------------------
+
+portal_app = typer.Typer(help="Portal de proveedores: contact", no_args_is_help=True)
+app.add_typer(portal_app, name="portal")
+
+
+@portal_app.command("contact")
+def portal_contact(supplier_ruc: str, email: str) -> None:
+    """Registra un correo de contacto del proveedor (acceso al portal y avisos)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.insights import add_contact
+
+        row = add_contact(ctx, supplier_ruc=supplier_ruc, email=email)
+        out.line(f"Contacto {row['email']} para {row['supplier_ruc']}")
+        out.data(row)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def kpis(month: Annotated[str, typer.Option(help="AAAA-MM")]) -> None:
+    """Indicadores del mes: procesamiento automático, tiempos de ciclo y costo de IA."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.insights import kpis as compute
+
+        data = compute(ctx, month=month)
+        for key, value in data.items():
+            out.line(f"  {key:<32} {value if value is not None else '—'}")
+        out.data(data)
+        return ExitCode.OK
+
+    _run(command)
+
+
 # --- Trabajos en cola, worker y programador --------------------------------------------
 
 

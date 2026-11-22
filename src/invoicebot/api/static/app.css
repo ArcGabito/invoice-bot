@@ -71,3 +71,7 @@ body.login { display: grid; place-items: center; min-height: 100vh; }
 .sso-divider { text-align: center; margin: 1rem 0 0.5rem; }
 a.button.sso { display: block; text-align: center; padding: 0.6rem 1rem; border: 1px solid currentColor;
   border-radius: 6px; text-decoration: none; }
+
+.login-card.portal { max-width: 960px; width: 100%; }
+#invoices { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: 0.9rem; }
+#invoices th, #invoices td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid #ddd; }
