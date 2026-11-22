@@ -1,27 +1,41 @@
-# InvoiceBot: una sola imagen para la API (Container App / servicio `api`) y para el
-# ciclo RPA (Container Apps Job / servicio `worker`). Ver docs/despliegue-azure.md y
-# docs/despliegue-vps.md.
+# syntax=docker/dockerfile:1.7
+# InvoiceBot: una sola imagen para todos los procesos. Cambia solo el comando:
+#   serve       API REST y pantalla de revisión   (Container App / servicio `api`)
+#   worker      colas de Redis (Dramatiq)          (Container App con KEDA / servicio `worker`)
+#   scheduler   tareas programadas                 (servicio `scheduler`)
+#   schedule tick · db migrate · run               (Container Apps Jobs)
+# Ver docs/despliegue-azure.md y docs/despliegue-vps.md.
 
 ARG PYTHON_VERSION=3.13
+ARG UV_VERSION=0.13.9
 
-# --- Compilación: dependencias en un entorno virtual ------------------------------
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
+# --- Compilación: dependencias con uv, exactamente las de uv.lock ------------------
 FROM python:${PYTHON_VERSION}-slim-bookworm AS build
-ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+COPY --from=uv /uv /bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential unixodbc-dev \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-RUN python -m venv /opt/venv
-ENV PATH=/opt/venv/bin:$PATH
-COPY pyproject.toml README.md LICENSE.md ./
+# Primero solo las dependencias: esta capa se reutiliza mientras no cambie uv.lock.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-dev --no-install-project
+COPY pyproject.toml uv.lock README.md LICENSE.md ./
 COPY src ./src
-RUN pip install --upgrade pip && pip install .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable
 
-# --- Imagen final -------------------------------------------------------------------
+# --- Imagen final (sin uv ni compiladores) --------------------------------------------
 FROM python:${PYTHON_VERSION}-slim-bookworm
-ARG TARGETARCH
 LABEL org.opencontainers.image.source="https://github.com/ArcGabito/invoice-bot" \
-      org.opencontainers.image.description="InvoiceBot: RPA de comprobantes peruanos (FastAPI + SQL Server)" \
+      org.opencontainers.image.description="InvoiceBot: RPA de comprobantes peruanos (FastAPI + SQL Server + Redis)" \
       org.opencontainers.image.licenses="MIT"
 
 # Controlador ODBC 18 de Microsoft (SQL Server y Azure SQL) y Tesseract con español.
@@ -61,6 +75,7 @@ USER 10001:0
 WORKDIR /data
 VOLUME ["/data"]
 EXPOSE 8000
+# Solo tiene sentido para `serve`: en Compose, worker y scheduler la desactivan.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)" || exit 1
 

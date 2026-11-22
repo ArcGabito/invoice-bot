@@ -121,6 +121,9 @@ class DbConfig:
     pool_size: int
     #: Inicio de sesión de Windows (cuenta de servicio) al que `db init` da acceso.
     windows_login: str | None
+    #: La API y la CLI aplican las migraciones pendientes al arrancar. Con varias réplicas
+    #: (Container Apps, Compose con --scale) conviene false y un `invoicebot db migrate` previo.
+    auto_migrate: bool = True
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,37 @@ class RunConfig:
 
 
 @dataclass(frozen=True)
+class QueueConfig:
+    #: inline: en el mismo proceso (Windows, pruebas) · redis: Dramatiq + Redis (VPS, Azure)
+    backend: str
+    #: La URL de Redis puede llevar contraseña: se lee del entorno al usarla.
+    redis_url_set: bool
+    namespace: str
+    worker_threads: int
+    #: Llamadas por minuto a la IA y a SUNAT entre todos los workers (0 = sin límite).
+    ai_rate_per_minute: int
+    sunat_rate_per_minute: int
+    job_max_attempts: int
+
+
+@dataclass(frozen=True)
+class ScheduleConfig:
+    """Expresiones cron (zona de la empresa). Vacío = la tarea no se programa."""
+
+    cycle: str | None
+    #: Correo + carpeta de entrada: registra los documentos nuevos y los encola.
+    collect: str | None
+    fx: str | None
+    sunat: str | None
+    retry: str | None
+    export: str | None
+    backup: str | None
+    purge: str | None
+    #: Días que se conservan los trabajos terminados.
+    job_retention_days: int
+
+
+@dataclass(frozen=True)
 class Config:
     ai_provider: str
     anthropic: AnthropicConfig
@@ -193,6 +227,8 @@ class Config:
     ocr: OcrConfig
     serve: ServeConfig
     run: RunConfig
+    queue: QueueConfig
+    schedule: ScheduleConfig
     timezone: str
     reviewer: str | None
     env: Mapping[str, str] = field(repr=False, compare=False, default_factory=dict)
@@ -376,6 +412,31 @@ def load_config(
         r.errors.append(f"INVOICEBOT_TIMEZONE: zona horaria desconocida {timezone!r}")
         timezone = "America/Lima"
 
+    redis_url_set = r.is_set("INVOICEBOT_REDIS_URL")
+    queue_backend = r.choice(
+        "INVOICEBOT_QUEUE_BACKEND", "redis" if redis_url_set else "inline", ("inline", "redis")
+    )
+    if queue_backend == "redis" and not redis_url_set:
+        r.errors.append("INVOICEBOT_QUEUE_BACKEND=redis requiere INVOICEBOT_REDIS_URL")
+    namespace = r.text("INVOICEBOT_QUEUE_NAMESPACE", "invoicebot") or "invoicebot"
+    if not re.fullmatch(r"[a-z0-9_-]{1,40}", namespace):
+        r.errors.append("INVOICEBOT_QUEUE_NAMESPACE: minúsculas, dígitos, - y _")
+
+    from invoicebot.domain.cron import CronError, parse_cron
+
+    def cron(name: str, default: str | None) -> str | None:
+        raw = r.text(name, default)
+        if raw is None or raw.lower() in ("off", "none", "-"):
+            return None
+        try:
+            parse_cron(raw)
+        except CronError as error:
+            r.errors.append(f"{name}: {error}")
+            return None
+        return raw
+
+    run_interval = r.integer("INVOICEBOT_RUN_INTERVAL_MINUTES", 15, 1, 24 * 60)
+
     provider = str(
         overrides.get("ai_provider") or r.text("INVOICEBOT_AI_PROVIDER") or "anthropic"
     ).lower()
@@ -470,6 +531,7 @@ def load_config(
             trust_server_certificate=r.flag("INVOICEBOT_DB_TRUST_CERT", False),
             pool_size=r.integer("INVOICEBOT_DB_POOL_MAX", 10, 1, 100),
             windows_login=r.text("INVOICEBOT_DB_WINDOWS_LOGIN"),
+            auto_migrate=r.flag("INVOICEBOT_AUTO_MIGRATE", True),
         ),
         export_dir=export_dir,
         export_format=r.choice("INVOICEBOT_EXPORT_FORMAT", "csv", ("csv", "xlsx")),
@@ -518,8 +580,30 @@ def load_config(
             inbox_dir=inbox_dir,
             recursive=r.flag("INVOICEBOT_INBOX_RECURSIVE", True),
             export=r.choice("INVOICEBOT_RUN_EXPORT", "none", ("none", "csv", "xlsx")),
-            interval_minutes=r.integer("INVOICEBOT_RUN_INTERVAL_MINUTES", 15, 1, 24 * 60),
+            interval_minutes=run_interval,
             partial_exit_code=r.integer("INVOICEBOT_RUN_PARTIAL_EXIT_CODE", 3, 0, 255),
+        ),
+        queue=QueueConfig(
+            backend=queue_backend,
+            redis_url_set=redis_url_set,
+            namespace=namespace,
+            worker_threads=r.integer("INVOICEBOT_WORKER_THREADS", 4, 1, 64),
+            ai_rate_per_minute=r.integer("INVOICEBOT_AI_RATE_PER_MINUTE", 0, 0, 100_000),
+            sunat_rate_per_minute=r.integer("INVOICEBOT_SUNAT_RATE_PER_MINUTE", 30, 0, 100_000),
+            job_max_attempts=r.integer("INVOICEBOT_JOB_MAX_ATTEMPTS", 5, 1, 50),
+        ),
+        # Con colas, el ciclo completo se reparte en tareas más pequeñas: por defecto se
+        # programan esas tareas y no el ciclo (que sigue disponible para Windows).
+        schedule=ScheduleConfig(
+            cycle=cron("INVOICEBOT_SCHEDULE_CYCLE", None),
+            collect=cron("INVOICEBOT_SCHEDULE_COLLECT", f"*/{min(run_interval, 59)} * * * *"),
+            fx=cron("INVOICEBOT_SCHEDULE_FX", "5 8,13,18 * * *"),
+            sunat=cron("INVOICEBOT_SCHEDULE_SUNAT", "30 */2 * * *"),
+            retry=cron("INVOICEBOT_SCHEDULE_RETRY", "*/30 * * * *"),
+            export=cron("INVOICEBOT_SCHEDULE_EXPORT", "0 6 * * *"),
+            backup=cron("INVOICEBOT_SCHEDULE_BACKUP", "0 2 * * *"),
+            purge=cron("INVOICEBOT_SCHEDULE_PURGE", "30 3 * * *"),
+            job_retention_days=r.integer("INVOICEBOT_JOB_RETENTION_DAYS", 30, 1, 3650),
         ),
         timezone=timezone,
         reviewer=overrides.get("reviewer") or r.text("INVOICEBOT_USER"),

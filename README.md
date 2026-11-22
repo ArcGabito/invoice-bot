@@ -2,7 +2,7 @@
 
 ![Wallpaper](https://media.gabito.dev/imagenes/1793201727477-invoice-bot-wallpaper.png)
 
-**Bot RPA de comprobantes de pago peruanos** en Python, con API REST (FastAPI) y SQL Server.
+**Bot RPA de comprobantes de pago peruanos** en Python, con API REST (FastAPI), SQL Server y colas en Redis.
 
 InvoiceBot recibe facturas, boletas y notas desde una carpeta, el correo o su API; lee el XML del comprobante electrónico cuando existe (sin IA) y, si no, el PDF, la foto o el escaneo con OCR e IA (Claude); **comprueba con código determinista** que los datos sean coherentes (RUC, IGV, totales, detracciones, tipo de cambio), detecta duplicados, verifica en SUNAT y lo guarda todo en SQL Server con trazabilidad. Lo dudoso queda en una bandeja de revisión web; lo correcto sale al Excel contable.
 
@@ -31,40 +31,48 @@ La versión 1.0 es la migración completa a Python de la 0.6 (Node.js, etiqueta 
 | **Azure Container Apps + Jobs** (Bicep), **VPS** (Docker Compose + Caddy) y **Windows** (tareas programadas) | ✅ nuevo |
 | **Cadena de conexión de SSMS**, seguridad integrada de Windows e identidad administrada de Azure | ✅ nuevo |
 | Solución de **Visual Studio** (`invoice-bot.slnx` + proyecto Python) | ✅ |
+| **Colas con Redis (Dramatiq)**: workers que escalan, reintentos con espera, idempotencia, programador cron | ✅ 1.1 |
+| **uv** (`uv.lock`) para dependencias reproducibles en desarrollo, Docker y CI | ✅ 1.1 |
+
+El plan por fases (multiempresa, aprobaciones, SIRE, pagos, portal de proveedores) está en [ROADMAP.md](ROADMAP.md).
 
 ## Arquitectura
 
 ```text
-           correo (IMAP/Gmail/Graph) ─┐
- carpeta / OneDrive / Azure Files ────┼──► ciclo RPA (invoicebot run) ──► SQL Server / Azure SQL
- otros sistemas ── POST /api/v1/documents ┘        │                          ▲
-                                                   ▼                          │
+           correo (IMAP/Gmail/Graph) ─┐                ┌──────────── Redis ────────────┐
+ carpeta / OneDrive / Azure Files ────┼─► scheduler ──►│ ingest · extract · sunat ·    │
+ otros sistemas ── POST /api/v1/documents ─► api ─────►│ default  (solo ids)           │
+                                                       └───────┬───────────────────────┘
+                                                               ▼
+                                     worker (ingest, sunat, default) · extractor (extract)
                XML UBL ─► lector sin IA ─┐   normalizar → validar →           │
-               PDF/foto ─► texto/OCR ─► IA ┘   duplicados → SUNAT → guardar ───┘
-                                                                              │
+               PDF/foto ─► texto/OCR ─► IA ┘   duplicados → SUNAT → guardar ───► SQL Server / Azure SQL
+                                                                              │  (fuente de verdad, tabla jobs)
              pantalla de revisión · API REST · Excel/CSV · Power BI (v_invoices)
 ```
+
+Sin Redis (`INVOICEBOT_QUEUE_BACKEND=inline`), todo corre en un proceso con `invoicebot run`, como en la 1.0.
 
 ```text
 src/invoicebot/
   domain/          reglas puras: normalización, validación, detracciones, SUNAT, duplicados
   application/     casos de uso: procesar, escanear, reintentar, revisar, exportar, ciclo RPA
-  infrastructure/  SQL Server, UBL, PDF (PDFium), OCR, Claude/Ollama, SUNAT, correo, Excel
+  infrastructure/  SQL Server, UBL, PDF (PDFium), OCR, Claude/Ollama, SUNAT, correo, Excel, colas
   api/             FastAPI: REST, autenticación, pantalla de revisión
   cli.py           Typer: los mismos comandos de la versión 0.x
 ```
 
 ## Instalación rápida (desarrollo)
 
-Requisitos: Python 3.12+, [ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) y un SQL Server (Express sirve) o Azure SQL.
+Requisitos: [uv](https://docs.astral.sh/uv/), [ODBC Driver 18 for SQL Server](https://learn.microsoft.com/sql/connect/odbc/download-odbc-driver-for-sql-server) y un SQL Server (Express sirve) o Azure SQL. Redis es opcional (colas).
 
 ```bash
 git clone https://github.com/ArcGabito/invoice-bot.git && cd invoice-bot
-python -m venv .venv
-.venv\Scripts\activate          # Linux/macOS: source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync                         # Python 3.13 y dependencias exactas de uv.lock en .venv
 copy .env.example .env          # Linux/macOS: cp
 ```
+
+Los comandos se ejecutan con `uv run invoicebot …` (o activando `.venv`).
 
 En `.env`, la conexión puede ser la cadena **tal como la copias de SSMS**:
 
@@ -89,11 +97,11 @@ Proveedores de IA: `anthropic` (Claude, `claude-opus-5-5` por defecto, con salid
 
 | Dónde | Cómo | Guía |
 | --- | --- | --- |
-| **Azure Container Apps** | Container App (API) + Container Apps Job programado (ciclo RPA) + Azure SQL serverless con identidad administrada + Azure Files | [docs/despliegue-azure.md](docs/despliegue-azure.md) |
-| **VPS Linux** | Docker Compose: `api`, `worker`, SQL Server opcional y Caddy (HTTPS) | [docs/despliegue-vps.md](docs/despliegue-vps.md) |
+| **Azure Container Apps** | API + workers con escalado KEDA según la cola + Job programador + Job de migraciones, Azure Managed Redis, Azure SQL serverless con identidad administrada y Azure Files (o el modo clásico: un Job con el ciclo) | [docs/despliegue-azure.md](docs/despliegue-azure.md) |
+| **VPS Linux** | Docker Compose: `api`, `worker`, `extractor`, `scheduler`, Redis, SQL Server opcional y Caddy (HTTPS); `--scale` para más workers | [docs/despliegue-vps.md](docs/despliegue-vps.md) |
 | **VM / servidor Windows** | Seguridad integrada, tareas programadas, cuenta de servicio gMSA | [docs/instalacion-windows.md](docs/instalacion-windows.md) |
 
-La imagen (`Dockerfile`) incluye ODBC 18 y Tesseract con español, corre sin privilegios y sirve tanto para la API (`serve`) como para el ciclo (`run`).
+La imagen (`Dockerfile`, construida con uv) incluye ODBC 18 y Tesseract con español, corre sin privilegios y sirve para todos los procesos: `serve`, `worker`, `scheduler`, `schedule tick`, `db migrate` y `run`.
 
 ## CLI
 
@@ -102,6 +110,10 @@ La imagen (`Dockerfile`) incluye ODBC 18 y Tesseract con español, corre sin pri
 | `invoicebot scan ./facturas [--recursive] [--dry-run] [--verify-sunat]` | Procesa los documentos de una carpeta (o un archivo). |
 | `invoicebot run [--watch] [--trigger scheduled]` | Ciclo desatendido: correo, tipo de cambio, reintentos, escaneo, SUNAT, exportación y copia. |
 | `invoicebot serve [--host] [--port] [--workers] [--open]` | API REST y pantalla de revisión. |
+| `invoicebot worker [--queues ingest,extract,sunat,default] [--threads 4]` | Atiende las colas de Redis (varias réplicas se reparten el trabajo). |
+| `invoicebot scheduler` · `schedule tick` · `schedule list` · `schedule set/enable/disable` | Tareas programadas (`INVOICEBOT_SCHEDULE_*`, cron) y reintentos. |
+| `invoicebot enqueue <tarea> [--payload JSON] [--wait]` · `tasks` | Encola una tarea; lista las disponibles. |
+| `invoicebot jobs list [--status failed]` · `show` · `retry` · `cancel` · `run` | Trabajos en cola (tabla `jobs`). |
 | `invoicebot status` · `review` · `duplicates` · `show <id>` | Consultas. |
 | `invoicebot approve <id>` · `correct <id> campo=valor…` · `reject <id> -r motivo` · `reopen <id>` · `resolve <incidencia>` | Revisión con auditoría. |
 | `invoicebot export --month 2026-10 --xlsx` | Exporta a Excel o CSV ([formato](docs/csv-format.md)). |
@@ -127,7 +139,7 @@ Documentación interactiva en `/docs` (OpenAPI). Autenticación:
 
 | Método y ruta | Uso |
 | --- | --- |
-| `POST /api/v1/documents` (multipart `files`) | Recibe comprobantes de otro sistema y los procesa al instante (el XML y su PDF juntos se vinculan). |
+| `POST /api/v1/documents` (multipart `files`) | Recibe comprobantes de otro sistema (el XML y su PDF juntos se vinculan). Con Redis responde `202` con el trabajo; sin Redis, `201` con el resumen. Admite `Idempotency-Key`. |
 | `GET /api/v1/invoices?month=&validation_status=&q=` | Listado paginado. |
 | `GET /api/v1/invoices/{id}` · `/document` | Detalle con incidencias, historial y correo de origen · archivo original. |
 | `POST /api/v1/invoices/{id}/approve` · `correct` · `reject` · `reopen` · `POST /api/v1/issues/{id}/resolve` | Revisión. |
@@ -136,7 +148,9 @@ Documentación interactiva en `/docs` (OpenAPI). Autenticación:
 | `GET/POST /api/v1/fx` | Tipos de cambio. |
 | `POST /api/v1/sunat/verify` | Verificación en SUNAT. |
 | `GET/POST /api/v1/runs` | Historial y lanzamiento de ciclos (el candado de SQL Server evita dos a la vez). |
-| `GET /healthz` · `GET /readyz` | Sondas de vida y de disponibilidad (base de datos y esquema). |
+| `GET /api/v1/tasks` · `GET/POST /api/v1/jobs` · `GET /api/v1/jobs/{id}` · `/events` (SSE) · `POST …/retry` · `…/cancel` | Trabajos en cola y su progreso en vivo. |
+| `GET /api/v1/schedules` | Programaciones y su próxima ejecución. |
+| `GET /healthz` · `GET /readyz` · `GET /metrics` | Sondas de vida y de disponibilidad (base de datos, esquema y cola) y métricas Prometheus (clave de lectura). |
 
 ```bash
 curl -H "Authorization: Bearer $INVOICEBOT_API_KEY" \
@@ -198,14 +212,14 @@ scan → descubrir archivos → SHA-256 → ¿ya procesado? → sí: omitir
 ## Desarrollo
 
 ```bash
-pytest tests/unit        # sin SQL Server
-pytest                   # unitarias + integración contra un SQL Server real
-ruff check src tests && ruff format --check src tests && mypy
+uv run pytest tests/unit        # sin SQL Server
+uv run pytest                   # unitarias + integración contra un SQL Server real (y Redis si está)
+uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy
 ```
 
-Las pruebas de integración crean y borran su propia base `invoicebot_test_<aleatorio>`. La conexión se lee de `INVOICEBOT_TEST_DB_CONNECTION_STRING` (también en formato SSMS) o de `INVOICEBOT_TEST_DB_SERVER`, `_PORT`, `_USER`, `_PASSWORD`, `_TRUST_CERT`, del entorno o de `.env.test`. En GitHub Actions corren contra un contenedor de SQL Server 2022.
+Las pruebas de Redis (worker Dramatiq real) usan `INVOICEBOT_TEST_REDIS_URL` (p. ej. `redis://localhost:6379/15`) y un espacio de claves propio que borran al terminar. Las pruebas de integración crean y borran su propia base `invoicebot_test_<aleatorio>`. La conexión se lee de `INVOICEBOT_TEST_DB_CONNECTION_STRING` (también en formato SSMS) o de `INVOICEBOT_TEST_DB_SERVER`, `_PORT`, `_USER`, `_PASSWORD`, `_TRUST_CERT`, del entorno o de `.env.test`. En GitHub Actions corren contra un contenedor de SQL Server 2022.
 
-Visual Studio: abre `invoice-bot.slnx` (carga de trabajo *Desarrollo de Python*); F5 inicia `invoicebot serve` con el entorno `.venv` y el *Explorador de pruebas* usa pytest.
+Visual Studio: abre `invoice-bot.slnx` (carga de trabajo *Desarrollo de Python*) después de `uv sync`; F5 inicia `invoicebot serve` con el entorno `.venv` y el *Explorador de pruebas* usa pytest.
 
 ## Licencia
 

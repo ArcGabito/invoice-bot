@@ -1,8 +1,17 @@
-// InvoiceBot en Azure Container Apps:
+// InvoiceBot en Azure Container Apps.
+//
+// Modo `queue` (por defecto): colas en Azure Managed Redis.
 // - Container App `api`: API REST y pantalla de revisión (HTTPS administrado).
-// - Container Apps Job `cycle`: el ciclo RPA programado (cron), una ejecución a la vez.
-// - Azure SQL Database serverless con autenticación Microsoft Entra (identidad administrada,
-//   sin contraseñas) y Azure Files para la carpeta de entrada y las exportaciones.
+// - Container Apps `worker` (ingest, sunat, default) y `extractor` (OCR e IA): escalan de 0 a N
+//   con KEDA según la longitud de su lista en Redis.
+// - Container Apps Job `scheduler`: `invoicebot schedule tick` cada pocos minutos (encola las
+//   tareas programadas y los reintentos vencidos).
+// - Container Apps Job `migrate`: `invoicebot db migrate`, manual, antes de cada versión.
+//
+// Modo `cycle` (clásico, sin Redis): Container Apps Job `cycle` con `invoicebot run`.
+//
+// En los dos: Azure SQL Database serverless con autenticación Microsoft Entra (identidad
+// administrada, sin contraseñas) y Azure Files para la carpeta de entrada y las exportaciones.
 //
 //   az group create -n rg-invoicebot -l eastus2
 //   az deployment group create -g rg-invoicebot -f deploy/azure/main.bicep \
@@ -28,8 +37,33 @@ param registryUsername string = ''
 @secure()
 param registryPassword string = ''
 
-@description('Cron del ciclo RPA en UTC (cada 15 minutos por defecto).')
+@description('queue: API + workers + Redis (escala) · cycle: un Job con el ciclo completo (sin Redis).')
+@allowed(['queue', 'cycle'])
+param mode string = 'queue'
+
+@description('Cron del ciclo RPA en UTC (solo modo cycle).')
 param cycleCron string = '*/15 * * * *'
+
+@description('Cron del programador en UTC (modo queue): encola tareas y reintentos vencidos.')
+param schedulerCron string = '*/2 * * * *'
+
+@description('Crear Azure Managed Redis. false = usar redisUrl (otro Redis).')
+param deployRedis bool = true
+
+@description('SKU de Azure Managed Redis (Balanced_B0 alcanza para la mayoría de oficinas).')
+param redisSku string = 'Balanced_B0'
+
+@description('Redis existente (solo con deployRedis=false): rediss://:clave@host:puerto/0')
+@secure()
+param redisUrl string = ''
+
+@description('Réplicas máximas de los workers.')
+@minValue(1)
+@maxValue(30)
+param workerMaxReplicas int = 5
+
+@description('Mensajes en cola por réplica del extractor antes de sumar otra.')
+param extractorQueueLength int = 5
 
 @description('Réplicas mínimas de la API (0 = escala a cero y arranca en frío).')
 @minValue(0)
@@ -58,6 +92,8 @@ param extraEnv array = []
 @secure()
 param extraSecrets object = {}
 
+var queueMode = mode == 'queue'
+var useManagedRedis = queueMode && deployRedis
 var suffix = uniqueString(resourceGroup().id, name)
 var storageName = toLower(take('${replace(name, '-', '')}${suffix}', 24))
 var sqlServerName = '${name}-sql-${suffix}'
@@ -145,6 +181,35 @@ resource database 'Microsoft.Sql/servers/databases@2021-11-01' = if (deploySql) 
   }
 }
 
+// Azure Managed Redis: TLS en el puerto 10000, sin desalojo (perder una clave = perder un
+// trabajo) y con AOF. Política de clúster Enterprise: el cliente lo ve como un Redis normal.
+resource redis 'Microsoft.Cache/redisEnterprise@2025-04-01' = if (useManagedRedis) {
+  name: '${name}-redis-${suffix}'
+  location: location
+  sku: { name: redisSku }
+  properties: {
+    minimumTlsVersion: '1.2'
+    highAvailability: 'Enabled'
+  }
+}
+
+resource redisDb 'Microsoft.Cache/redisEnterprise/databases@2025-04-01' = if (useManagedRedis) {
+  parent: redis
+  name: 'default'
+  properties: {
+    clientProtocol: 'Encrypted'
+    port: 10000
+    clusteringPolicy: 'EnterpriseCluster'
+    evictionPolicy: 'NoEviction'
+    accessKeysAuthentication: 'Enabled'
+    persistence: { aofEnabled: true, aofFrequency: '1s' }
+  }
+}
+
+var redisHost = useManagedRedis ? '${redis!.properties.hostName}:10000' : ''
+var redisPassword = useManagedRedis ? redisDb!.listKeys().primaryKey : ''
+var effectiveRedisUrl = useManagedRedis ? 'rediss://:${redisPassword}@${redisHost}/0' : redisUrl
+
 resource environmentResource 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: '${name}-env'
   location: location
@@ -183,6 +248,8 @@ var registries = empty(registryServer) ? [] : [
 var baseSecrets = concat(
   empty(anthropicApiKey) ? [] : [{ name: 'anthropic-api-key', value: anthropicApiKey }],
   empty(registryServer) ? [] : [{ name: 'registry-password', value: registryPassword }],
+  queueMode ? [{ name: 'redis-url', value: effectiveRedisUrl }] : [],
+  useManagedRedis ? [{ name: 'redis-password', value: redisPassword }] : [],
   secretEntries
 )
 
@@ -199,9 +266,34 @@ var env = concat(
     { name: 'INVOICEBOT_LOG_FORMAT', value: 'json' }
   ],
   empty(anthropicApiKey) ? [] : [{ name: 'ANTHROPIC_API_KEY', secretRef: 'anthropic-api-key' }],
+  queueMode
+    ? [
+        { name: 'INVOICEBOT_QUEUE_BACKEND', value: 'redis' }
+        { name: 'INVOICEBOT_REDIS_URL', secretRef: 'redis-url' }
+        // Migra solo el Job `migrate`: con varias réplicas no compiten por el esquema.
+        { name: 'INVOICEBOT_AUTO_MIGRATE', value: 'false' }
+      ]
+    : [],
   secretEnv,
   extraEnv
 )
+
+// KEDA: una regla por lista de Redis que atiende cada Container App (gana la que pida más).
+// Con Azure Managed Redis la dirección y la clave se conocen aquí; con un Redis externo,
+// define las reglas a mano o usa minReplicas >= 1.
+func queueRule(queue string, length string, host string) object => {
+  name: 'queue-${queue}'
+  custom: {
+    type: 'redis'
+    metadata: {
+      address: host
+      listName: 'invoicebot:${queue}'
+      listLength: length
+      enableTLS: 'true'
+    }
+    auth: [{ secretRef: 'redis-password', triggerParameter: 'password' }]
+  }
+}
 
 var volumes = [
   {
@@ -258,7 +350,118 @@ resource api 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
-resource cycle 'Microsoft.App/jobs@2024-03-01' = {
+var workerApps = [
+  { name: 'worker', args: ['worker', '--queues', 'ingest,sunat,default'], queues: ['ingest', 'sunat', 'default'], length: '10', cpu: '0.5', memory: '1Gi' }
+  { name: 'extractor', args: ['worker', '--queues', 'extract'], queues: ['extract'], length: string(extractorQueueLength), cpu: '1.0', memory: '2Gi' }
+]
+
+resource workers 'Microsoft.App/containerApps@2024-03-01' = [for app in workerApps: if (queueMode) {
+  name: '${name}-${app.name}'
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${identity.id}': {} }
+  }
+  properties: {
+    managedEnvironmentId: environmentResource.id
+    configuration: {
+      registries: registries
+      secrets: baseSecrets
+    }
+    template: {
+      containers: [
+        {
+          name: app.name
+          image: image
+          args: app.args
+          env: env
+          resources: { cpu: json(app.cpu), memory: app.memory }
+          volumeMounts: volumeMounts
+        }
+      ]
+      volumes: volumes
+      // Al reducir réplicas, Container Apps envía SIGTERM: el worker termina lo que tiene en curso.
+      terminationGracePeriodSeconds: 120
+      scale: {
+        minReplicas: useManagedRedis ? 0 : 1
+        maxReplicas: workerMaxReplicas
+        rules: useManagedRedis ? map(app.queues, q => queueRule(q, app.length, redisHost)) : []
+      }
+    }
+  }
+}]
+
+resource scheduler 'Microsoft.App/jobs@2024-03-01' = if (queueMode) {
+  name: '${name}-scheduler'
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${identity.id}': {} }
+  }
+  properties: {
+    environmentId: environmentResource.id
+    configuration: {
+      triggerType: 'Schedule'
+      scheduleTriggerConfig: {
+        cronExpression: schedulerCron
+        parallelism: 1
+        replicaCompletionCount: 1
+      }
+      replicaTimeout: 300
+      replicaRetryLimit: 0
+      registries: registries
+      secrets: baseSecrets
+    }
+    template: {
+      containers: [
+        {
+          name: 'scheduler'
+          image: image
+          args: ['schedule', 'tick']
+          env: env
+          resources: { cpu: json('0.25'), memory: '0.5Gi' }
+          volumeMounts: volumeMounts
+        }
+      ]
+      volumes: volumes
+    }
+  }
+}
+
+resource migrate 'Microsoft.App/jobs@2024-03-01' = {
+  name: '${name}-migrate'
+  location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: { '${identity.id}': {} }
+  }
+  properties: {
+    environmentId: environmentResource.id
+    configuration: {
+      triggerType: 'Manual'
+      manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 }
+      replicaTimeout: 1800
+      replicaRetryLimit: 1
+      registries: registries
+      secrets: baseSecrets
+    }
+    template: {
+      containers: [
+        {
+          name: 'migrate'
+          image: image
+          args: ['db', 'migrate']
+          env: concat(env, [{ name: 'INVOICEBOT_AUTO_MIGRATE', value: 'true' }])
+          resources: { cpu: json('0.5'), memory: '1Gi' }
+          volumeMounts: volumeMounts
+        }
+      ]
+      volumes: volumes
+    }
+  }
+}
+
+resource cycle 'Microsoft.App/jobs@2024-03-01' = if (!queueMode) {
   name: '${name}-cycle'
   location: location
   identity: {
@@ -297,7 +500,11 @@ resource cycle 'Microsoft.App/jobs@2024-03-01' = {
 }
 
 output apiUrl string = 'https://${api.properties.configuration.ingress.fqdn}'
-output cycleJob string = cycle.name
+output mode string = mode
+output migrateJob string = migrate.name
+output schedulerJob string = queueMode ? scheduler.name : ''
+output cycleJob string = queueMode ? '' : cycle.name
+output redisHost string = redisHost
 output sqlServer string = sqlHost
 output identityClientId string = identity.properties.clientId
 output storageAccount string = storage.name

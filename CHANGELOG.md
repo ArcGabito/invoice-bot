@@ -2,6 +2,26 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
 
+## [Sin publicar]
+
+### Añadido
+
+- **Colas con Redis (Dramatiq)**: el trabajo se reparte en tareas (`inbox.collect`, `documents.scan`, `documents.process`, `documents.retry`, `fx.fetch`, `sunat.verify`, `exports.monthly`, `db.backup`, `jobs.purge` y `bot.cycle`) en cuatro colas (`ingest`, `extract`, `sunat`, `default`). Nuevos comandos `invoicebot worker` (varias réplicas se reparten la cola), `invoicebot enqueue`, `invoicebot tasks` e `invoicebot jobs list|show|retry|cancel|run`.
+- **Tabla `jobs`** (migración `006_jobs_and_schedules`): SQL Server es la fuente de verdad de cada trabajo (intentos, resultado, error, trabajo padre). Reintentos con espera exponencial (15 s, 30 s, 1 min… hasta 1 h), errores permanentes sin reintento, deduplicación mientras el trabajo está activo (`documents.process:<id>`) y claves de idempotencia.
+- **Programador**: `invoicebot scheduler` (VPS) o `invoicebot schedule tick` (Container Apps Job, tarea de Windows) con expresiones cron en la zona de la empresa (`INVOICEBOT_SCHEDULE_COLLECT`, `_FX`, `_SUNAT`, `_RETRY`, `_EXPORT`, `_BACKUP`, `_PURGE`, `_CYCLE`). Tabla `schedules`; `schedule list|set|enable|disable`. Republica los trabajos que quedaron sin enviar (Redis caído) y los reintentos vencidos.
+- **Límites de llamadas compartidos** entre todos los workers: `INVOICEBOT_AI_RATE_PER_MINUTE` (Claude, Ollama, visión) e `INVOICEBOT_SUNAT_RATE_PER_MINUTE`.
+- API: `GET /api/v1/tasks`, `GET/POST /api/v1/jobs`, `GET /api/v1/jobs/{id}`, progreso en vivo por Server-Sent Events (`/api/v1/jobs/{id}/events`), `POST /api/v1/jobs/{id}/retry|cancel`, `GET /api/v1/schedules` y `GET /metrics` (Prometheus, con clave de lectura). Cabecera `Idempotency-Key` en `POST /api/v1/documents` y `POST /api/v1/jobs`.
+- `INVOICEBOT_AUTO_MIGRATE=false` para que solo `invoicebot db migrate` (servicio `migrate`, Job `migrate`) cambie el esquema cuando hay varias réplicas.
+- `invoicebot doctor` comprueba la cola y `invoicebot config` la muestra.
+
+### Cambiado
+
+- **uv**: `uv.lock`, `.python-version` (3.13) y grupo de dependencias `dev` (PEP 735). El Dockerfile instala con `uv sync --locked` y el CI usa `astral-sh/setup-uv`. `pip install -e .` sigue funcionando.
+- Con la cola Redis, `POST /api/v1/documents` responde `202` con el trabajo y `POST /api/v1/runs` encola un `bot.cycle`. Sin Redis responden como antes.
+- **Docker Compose**: servicios `api`, `worker` (ingest, sunat, default), `extractor` (OCR e IA, con más CPU), `scheduler`, `redis` (AOF, `noeviction`, contraseña) y `migrate` (perfil `tools`).
+- **Bicep**: `mode=queue` (por defecto) crea Azure Managed Redis, Container Apps `worker` y `extractor` que escalan de 0 a N con KEDA según su lista en Redis, un Job programado `scheduler` y un Job manual `migrate`; `mode=cycle` mantiene el Job clásico. El workflow de despliegue ejecuta las migraciones y espera a que terminen.
+- `/readyz` también comprueba la cola.
+
 ## [1.0.0] - 2026-11-21
 
 Migración completa de Node.js/TypeScript a **Python 3.12+ con FastAPI**. La versión anterior queda en la etiqueta `v0.6.0-node`.

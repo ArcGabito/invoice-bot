@@ -1,4 +1,4 @@
-# Despliegue manual en Azure Container Apps (API + Job programado).
+# Despliegue manual en Azure Container Apps (API, workers, programador y migraciones).
 # Requiere una federación OIDC de GitHub con Microsoft Entra y estos secretos del
 # repositorio: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID y ANTHROPIC_API_KEY.
 # Guía: docs/despliegue-azure.md
@@ -38,11 +38,27 @@ jobs:
       - name: Grupo de recursos
         run: az group create -n "${{ inputs.resource_group }}" -l "${{ inputs.location }}" -o none
       - name: Plantilla Bicep
+        id: bicep
         run: |
-          az deployment group create \
+          outputs=$(az deployment group create \
             -g "${{ inputs.resource_group }}" \
             -f deploy/azure/main.bicep \
             -p deploy/azure/main.parameters.json \
             -p image=ghcr.io/arcgabito/invoice-bot:${{ inputs.image_tag }} \
             -p anthropicApiKey="${{ secrets.ANTHROPIC_API_KEY }}" \
-            --query properties.outputs -o json
+            --query properties.outputs -o json)
+          echo "$outputs" | jq '{apiUrl, mode, migrateJob, schedulerJob, cycleJob}'
+          echo "migrate_job=$(echo "$outputs" | jq -r .migrateJob.value)" >> "$GITHUB_OUTPUT"
+      # Las réplicas no migran (INVOICEBOT_AUTO_MIGRATE=false): la nueva revisión queda "no lista"
+      # (/readyz) y la anterior sigue atendiendo hasta que este Job aplica las migraciones.
+      - name: Migraciones
+        run: |
+          rg="${{ inputs.resource_group }}"; job="${{ steps.bicep.outputs.migrate_job }}"
+          execution=$(az containerapp job start -n "$job" -g "$rg" --query name -o tsv)
+          for _ in $(seq 1 90); do
+            status=$(az containerapp job execution show -n "$job" -g "$rg" --job-execution-name "$execution" --query properties.status -o tsv)
+            echo "migración: $status"
+            case "$status" in Succeeded) exit 0 ;; Failed|Stopped|Degraded) exit 1 ;; esac
+            sleep 10
+          done
+          echo "La migración no terminó en 15 minutos"; exit 1

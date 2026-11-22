@@ -18,14 +18,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v7
         with:
-          python-version: '3.13'
-          cache: pip
-      - run: pip install -e ".[dev]"
-      - run: ruff check src tests
-      - run: ruff format --check src tests
-      - run: mypy
+          enable-cache: true
+      - name: uv.lock al día con pyproject.toml
+        run: uv lock --check
+      - run: uv sync --locked
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
+      - run: uv run mypy
 
   # Pruebas completas contra un SQL Server real (contenedor de servicio).
   test:
@@ -39,7 +40,18 @@ jobs:
       INVOICEBOT_TEST_DB_TRUST_CERT: 'true'
       # Falla en vez de omitir las pruebas de integración si falta la conexión.
       INVOICEBOT_TEST_DB_REQUIRED: 'true'
+      INVOICEBOT_TEST_REDIS_URL: redis://localhost:6379/15
+      INVOICEBOT_TEST_REDIS_REQUIRED: 'true'
     services:
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
       sqlserver:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
@@ -56,10 +68,9 @@ jobs:
           --health-start-period 30s
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v7
         with:
-          python-version: '3.13'
-          cache: pip
+          enable-cache: true
       - name: Controlador ODBC 18 y Tesseract
         run: |
           if ! dpkg -s msodbcsql18 >/dev/null 2>&1; then
@@ -69,19 +80,18 @@ jobs:
             sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
           fi
           sudo apt-get install -y unixodbc tesseract-ocr tesseract-ocr-spa
-      - run: pip install -e ".[dev]"
-      - run: pytest --cov --cov-report=term-missing:skip-covered
+      - run: uv sync --locked
+      - run: uv run pytest --cov --cov-report=term-missing:skip-covered
 
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v7
         with:
-          python-version: '3.13'
-          cache: pip
-      - run: pip install -e ".[dev]"
-      - run: pytest tests/unit
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pytest tests/unit
 
   docker:
     runs-on: ubuntu-latest
@@ -94,7 +104,7 @@ jobs:
           docker run --rm invoicebot:ci --version
           docker run --rm --entrypoint sh invoicebot:ci -c "odbcinst -q -d | grep -q 'ODBC Driver 18' && tesseract --list-langs | grep -q spa"
       - name: docker-compose.yml es válido
-        run: touch .env && MSSQL_SA_PASSWORD=x INVOICEBOT_DOMAIN=example.com docker compose --profile sql --profile proxy config --quiet
+        run: touch .env && REDIS_PASSWORD=x MSSQL_SA_PASSWORD=x INVOICEBOT_DOMAIN=example.com docker compose --profile sql --profile proxy --profile tools config --quiet
       - name: La plantilla de Azure (Bicep) compila
         run: az bicep build --file deploy/azure/main.bicep --stdout > /dev/null
 

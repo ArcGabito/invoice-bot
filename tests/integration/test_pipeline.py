@@ -13,7 +13,7 @@ from invoicebot.application.reports import build_export, find_duplicates
 from invoicebot.application.verify_sunat import verify_sunat
 from invoicebot.domain.sunat_status import SunatResult
 from invoicebot.errors import ReviewError
-from invoicebot.infrastructure.db.migration import run_migrations, schema_status
+from invoicebot.infrastructure.db.migration import all_migrations, run_migrations, schema_status
 from tests import builders
 
 pytestmark = pytest.mark.db
@@ -26,7 +26,8 @@ def issue_codes(repository, invoice_id):
 def test_migrations_are_idempotent(clean_db):
     assert run_migrations(clean_db).applied == []
     status = schema_status(clean_db)
-    assert status["current"] == status["latest"] == 5 and not status["pending"]
+    assert status["current"] == status["latest"] == max(m.version for m in all_migrations())
+    assert not status["pending"]
 
 
 def test_scan_xml_links_pdf_skips_cdr_and_is_idempotent(deps, tmp_path: Path):

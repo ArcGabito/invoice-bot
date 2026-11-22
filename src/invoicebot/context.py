@@ -7,7 +7,7 @@ import logging
 import threading
 from functools import cached_property
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from invoicebot.application.deps import Deps
 from invoicebot.application.ports import AiProvider, MailSource, VisionExtractor
@@ -22,6 +22,11 @@ from invoicebot.infrastructure.db.migration import MigrationResult, run_migratio
 from invoicebot.infrastructure.db.user_repository import UserRepository
 from invoicebot.infrastructure.documents.router import DocumentRouter
 from invoicebot.logging_setup import configure_logging
+
+if TYPE_CHECKING:
+    from invoicebot.application.jobs import JobQueue, Jobs
+    from invoicebot.infrastructure.db.job_repository import JobRepository
+    from invoicebot.infrastructure.queue import RateLimiter
 
 
 class AppContext:
@@ -39,6 +44,8 @@ class AppContext:
         self._logger = logger
         self._schema_checked = False
         self._schema_lock = threading.Lock()
+        self._limiters: dict[str, RateLimiter] = {}
+        self._limiters_lock = threading.Lock()
 
     # --- Configuración y logs ---------------------------------------------------
 
@@ -66,8 +73,13 @@ class AppContext:
     def db(self) -> Database:
         return Database.from_config(self.config.db, self.config.env)
 
-    def ensure_schema(self, *, migrate: bool = True) -> MigrationResult | None:
-        """Aplica las migraciones pendientes (con copia previa) una vez por proceso."""
+    def ensure_schema(self, *, migrate: bool | None = None) -> MigrationResult | None:
+        """Aplica las migraciones pendientes (con copia previa) una vez por proceso.
+
+        Con ``migrate=None`` decide INVOICEBOT_AUTO_MIGRATE; los workers pasan False.
+        """
+        if migrate is None:
+            migrate = self.config.db.auto_migrate
         with self._schema_lock:
             if self._schema_checked:
                 return None
@@ -171,6 +183,119 @@ class AppContext:
                 "Define INVOICEBOT_INBOX_DIR (o INVOICEBOT_MAIL_DIR) para guardar los adjuntos"
             )
         return str(Path(inbox) / "correo")
+
+    # --- Trabajos en cola ---------------------------------------------------------
+
+    @cached_property
+    def job_repository(self) -> JobRepository:
+        from invoicebot.infrastructure.db.job_repository import JobRepository
+
+        self.ensure_schema()
+        return JobRepository(self.db)
+
+    @cached_property
+    def redis(self) -> Any:
+        """Cliente de Redis (INVOICEBOT_REDIS_URL); None con la cola inline."""
+        url = self.config.secret("INVOICEBOT_REDIS_URL")
+        if not url:
+            return None
+        from invoicebot.infrastructure.queue.redis_queue import create_redis_client
+
+        return create_redis_client(url)
+
+    @cached_property
+    def queue(self) -> JobQueue:
+        from invoicebot.application.tasks import registry
+
+        if self.config.queue.backend == "redis":
+            from invoicebot.infrastructure.queue.redis_queue import RedisQueue
+
+            if self.redis is None:
+                raise ConfigError("INVOICEBOT_QUEUE_BACKEND=redis requiere INVOICEBOT_REDIS_URL")
+            redis_queue = RedisQueue(
+                client=self.redis, namespace=self.config.queue.namespace, registry=registry
+            )
+            redis_queue.bind(self._execute_job)
+            return redis_queue
+        from invoicebot.infrastructure.queue import InlineQueue
+
+        return InlineQueue(self._execute_job)
+
+    def _execute_job(self, job_id: int) -> str:
+        return self.jobs.execute(job_id)
+
+    @cached_property
+    def jobs(self) -> Jobs:
+        from invoicebot.application.jobs import Jobs
+        from invoicebot.application.tasks import registry
+
+        return Jobs(
+            repository=self.job_repository,
+            queue=self.queue,
+            registry=registry,
+            context=self,
+            default_max_attempts=self.config.queue.job_max_attempts,
+            logger=self.logger,
+        )
+
+    def dispatch_document(self, document: dict[str, Any]) -> None:
+        """Encola el procesamiento de un documento (una sola vez mientras siga activo)."""
+        document_id = int(document["id"])
+        self.jobs.enqueue(
+            "documents.process",
+            {"document_id": document_id},
+            dedupe_key=f"documents.process:{document_id}",
+        )
+
+    def rate_limiter(self, name: str) -> RateLimiter:
+        """Límite de llamadas por minuto compartido por todos los workers (`ai` o `sunat`)."""
+        from invoicebot.infrastructure.queue import RateLimiter
+
+        with self._limiters_lock:
+            if name not in self._limiters:
+                per_minute = {
+                    "ai": self.config.queue.ai_rate_per_minute,
+                    "sunat": self.config.queue.sunat_rate_per_minute,
+                }[name]
+                self._limiters[name] = RateLimiter(
+                    f"{self.config.queue.namespace}:rate:{name}",
+                    per_minute,
+                    redis_client=self.redis,
+                )
+            return self._limiters[name]
+
+    @cached_property
+    def _limited_ai(self) -> tuple[Any, Any]:
+        from invoicebot.infrastructure.queue.limits import RateLimited
+
+        limiter = self.rate_limiter("ai")
+        vision = self.vision_extractor
+        return (
+            RateLimited(self.ai_provider, limiter, ("extract",)),
+            RateLimited(vision, limiter, ("extract", "extract_from_file")) if vision else None,
+        )
+
+    @property
+    def worker_deps(self) -> Deps:
+        """Dependencias de las tareas: la IA y la visión pasan por el límite de llamadas.
+
+        Es una propiedad (no se guarda): un worker vive días y la fecha cambia.
+        """
+        ai, vision = self._limited_ai
+        return Deps(
+            config=self.config,
+            repository=self.repository,
+            document_router=self.document_router,
+            ai_provider=ai,
+            vision_extractor=vision,
+            today=self.config.today(),
+            logger=self.logger,
+        )
+
+    def limited_sunat_client(self) -> Any:
+        from invoicebot.infrastructure.queue.limits import RateLimited
+
+        return RateLimited(self.sunat_client(), self.rate_limiter("sunat"), ("validate_receipt",))
 
     # --- Ciclo RPA --------------------------------------------------------------
 
