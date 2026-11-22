@@ -1,0 +1,13 @@
+# HTTPS automático (Let's Encrypt) para la API y la pantalla de revisión.
+{$INVOICEBOT_DOMAIN} {
+	encode zstd gzip
+	request_body {
+		max_size 60MB
+	}
+	reverse_proxy api:8000 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+	header {
+		-Server
+	}
+}

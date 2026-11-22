@@ -1,0 +1,596 @@
+"""API REST (FastAPI) y pantalla de revisión de InvoiceBot.
+
+Pensada para correr detrás de un proxy HTTPS (Azure Container Apps, Caddy/Nginx en
+un VPS) o con TLS propio (INVOICEBOT_SERVE_TLS_CERT/_KEY en una VM Windows).
+"""
+
+import json
+import secrets
+import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Annotated, Any
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+
+from invoicebot import __version__
+from invoicebot.api.security import (
+    LoginThrottle,
+    Principal,
+    authenticate_request,
+    client_ip,
+    cookie_name,
+    is_secure_request,
+    require_write,
+)
+from invoicebot.application import review
+from invoicebot.application.exchange_rates import save_exchange_rates
+from invoicebot.application.processing import scan_invoices
+from invoicebot.application.reports import build_export, check_month, find_duplicates
+from invoicebot.application.users import authenticate
+from invoicebot.application.verify_sunat import verify_sunat
+from invoicebot.context import AppContext
+from invoicebot.domain.invoice import DOCUMENT_TYPES
+from invoicebot.domain.review import CORRECTABLE_FIELDS, ReviewStatus
+from invoicebot.errors import (
+    ConfigError,
+    InvoiceBotError,
+    LockedError,
+    ReviewError,
+    UserError,
+    error_message,
+)
+from invoicebot.infrastructure.db.invoice_repository import month_range
+from invoicebot.infrastructure.db.migration import schema_status
+from invoicebot.infrastructure.documents.scanner import SUPPORTED_EXTENSIONS
+from invoicebot.infrastructure.mail.attachments import safe_file_name
+from invoicebot.infrastructure.sunat import parse_date
+
+_HERE = Path(__file__).parent
+
+
+def _default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        # DATETIME2 de SQL Server llega sin zona: es UTC.
+        return (
+            (value if value.tzinfo else value.replace(tzinfo=UTC))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, bytes):
+        return value.hex()
+    if hasattr(value, "as_dict"):
+        return value.as_dict()
+    if hasattr(value, "__dataclass_fields__"):
+        from dataclasses import asdict
+
+        return asdict(value)
+    raise TypeError(f"No serializable: {type(value).__name__}")
+
+
+class ApiResponse(JSONResponse):
+    """JSON con fechas UTC (sufijo Z), Decimal como número y dataclasses."""
+
+    def render(self, content: Any) -> bytes:
+        return json.dumps(
+            content, ensure_ascii=False, default=_default, separators=(",", ":")
+        ).encode()
+
+
+class SecurityHeaders(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        response = await call_next(request)
+        headers = response.headers
+        headers.setdefault("X-Content-Type-Options", "nosniff")
+        headers.setdefault("Referrer-Policy", "no-referrer")
+        headers.setdefault("X-Frame-Options", "DENY")
+        headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        if request.url.path.startswith(("/docs", "/redoc")):
+            return response  # Swagger UI usa recursos de su CDN.
+        headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
+            "frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+            "frame-ancestors 'none'",
+        )
+        if request.url.scheme == "https":
+            headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+        return response
+
+
+# --- Modelos de entrada -------------------------------------------------------------
+
+
+class LoginBody(BaseModel):
+    username: str = Field(max_length=100)
+    password: str = Field(max_length=300)
+
+
+class NoteBody(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
+    force: bool = False
+
+
+class RejectBody(BaseModel):
+    reason: str = Field(max_length=1000)
+
+
+class CorrectBody(BaseModel):
+    changes: dict[str, str | int | float | None]
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class ExchangeRateBody(BaseModel):
+    date: str = Field(description="AAAA-MM-DD o DD/MM/AAAA")
+    sell: float = Field(gt=0)
+    buy: float | None = Field(default=None, gt=0)
+    currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
+
+
+class SunatBody(BaseModel):
+    month: str | None = None
+    force: bool = False
+    limit: int | None = Field(default=50, ge=1, le=1000)
+
+
+def create_app(context: AppContext | None = None) -> FastAPI:
+    ctx = context or AppContext()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            ctx.ensure_schema()
+        except Exception as error:  # La API arranca igual; /readyz informa el problema.
+            ctx.logger.error("la base de datos no está lista: %s", error_message(error))
+        yield
+        ctx.close()
+
+    docs = ctx.config.serve.api_docs
+    app = FastAPI(
+        title="InvoiceBot API",
+        version=__version__,
+        description="RPA de comprobantes de pago peruanos: XML UBL, PDF, OCR e IA, validación "
+        "contable, SUNAT y SQL Server.",
+        lifespan=lifespan,
+        default_response_class=ApiResponse,
+        docs_url="/docs" if docs else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if docs else None,
+    )
+    app.state.context = ctx
+    app.state.throttle = LoginThrottle()
+    app.state.run_thread = None
+    app.add_middleware(SecurityHeaders)
+    app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
+    templates = Jinja2Templates(directory=_HERE / "templates")
+
+    @app.exception_handler(InvoiceBotError)
+    async def invoicebot_error(_: Request, error: InvoiceBotError) -> Response:
+        status = 400 if isinstance(error, ReviewError | UserError | ConfigError) else 500
+        if isinstance(error, LockedError):
+            status = 409
+        if status == 500:
+            ctx.logger.error("error en la API: %s", error.message)
+        return ApiResponse({"detail": error.message, "code": error.code}, status_code=status)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_: Request, error: RequestValidationError) -> Response:
+        return ApiResponse(
+            {"detail": "Datos no válidos", "errors": error.errors()}, status_code=422
+        )
+
+    Auth = Annotated[Principal, Depends(authenticate_request)]
+
+    def writer(principal: Auth) -> Principal:
+        return require_write(principal)
+
+    Writer = Annotated[Principal, Depends(writer)]
+
+    # --- Salud -----------------------------------------------------------------------
+
+    @app.get("/healthz", include_in_schema=False)
+    def healthz() -> dict[str, str]:
+        return {"status": "ok", "version": __version__}
+
+    @app.get("/readyz", include_in_schema=False)
+    def readyz() -> Response:
+        try:
+            status = schema_status(ctx.db)
+            ready = not status["pending"] and not status["ahead"]
+            return ApiResponse(
+                {"status": "ok" if ready else "migrating", "schema": status},
+                status_code=200 if ready else 503,
+            )
+        except Exception as error:
+            return ApiResponse({"status": "error", "detail": error_message(error)}, status_code=503)
+
+    # --- Pantalla de revisión --------------------------------------------------------
+
+    @app.get("/", include_in_schema=False, response_model=None)
+    def index(request: Request) -> Response:
+        try:
+            principal = authenticate_request(request)
+        except HTTPException:
+            return RedirectResponse("/login", status_code=303)
+        return templates.TemplateResponse(
+            request,
+            "review.html",
+            {"version": __version__, "user": principal, "csrf": principal.csrf},
+        )
+
+    @app.get("/login", include_in_schema=False, response_class=HTMLResponse)
+    def login_page(request: Request) -> Response:
+        return templates.TemplateResponse(request, "login.html", {"version": __version__})
+
+    @app.post("/api/v1/auth/login", tags=["auth"])
+    def login(body: LoginBody, request: Request) -> Response:
+        ip = client_ip(request)
+        username = body.username.strip().lower()
+        keys = [f"ip:{ip}", f"user:{username}"]
+        throttle: LoginThrottle = app.state.throttle
+        if throttle.is_locked(keys):
+            ctx.logger.warning(
+                "acceso bloqueado temporalmente", extra={"username": username, "ip": ip}
+            )
+            raise HTTPException(429, "Demasiados intentos fallidos. Espera 15 minutos.")
+        user = authenticate(ctx.users, username, body.password)
+        if not user:
+            throttle.record_failure(keys)
+            ctx.logger.warning("acceso rechazado", extra={"username": username, "ip": ip})
+            raise HTTPException(401, "Usuario o contraseña incorrectos")
+        throttle.clear(keys)
+        hours = ctx.config.serve.session_hours
+        token, csrf = ctx.users.create_session(user["id"], hours=hours, ip=ip)
+        ctx.logger.info(
+            "acceso a la pantalla de revisión", extra={"username": user["username"], "ip": ip}
+        )
+        secure = is_secure_request(request, ctx.config.serve.cookie_secure)
+        response = ApiResponse({"ok": True, "csrf": csrf, "user": user["username"]})
+        response.set_cookie(
+            cookie_name(secure),
+            token,
+            max_age=hours * 3600,
+            httponly=True,
+            samesite="strict",
+            secure=secure,
+            path="/",
+        )
+        return response
+
+    @app.post("/api/v1/auth/logout", tags=["auth"])
+    def logout(request: Request, principal: Auth) -> Response:
+        ctx.users.delete_session(principal.session_token)
+        secure = is_secure_request(request, ctx.config.serve.cookie_secure)
+        response = ApiResponse({"ok": True})
+        response.delete_cookie(
+            cookie_name(secure), path="/", secure=secure, httponly=True, samesite="strict"
+        )
+        return response
+
+    @app.get("/api/v1/auth/me", tags=["auth"])
+    def me(principal: Auth) -> dict[str, Any]:
+        return {
+            "kind": principal.kind,
+            "name": principal.name,
+            "display_name": principal.display_name,
+            "scope": principal.scope,
+        }
+
+    # --- Consultas -------------------------------------------------------------------
+
+    @app.get("/api/v1/meta", tags=["consultas"])
+    def meta(principal: Auth) -> dict[str, Any]:
+        return {
+            "version": __version__,
+            "reviewer": principal.signature,
+            "fields": CORRECTABLE_FIELDS,
+            "document_types": DOCUMENT_TYPES,
+        }
+
+    @app.get("/api/v1/status", tags=["consultas"])
+    def status(_: Auth) -> dict[str, Any]:
+        repo = ctx.repository
+        return {
+            "summary": repo.get_status_summary(),
+            "runs": repo.list_bot_runs(10),
+            "database": ctx.db.describe(),
+        }
+
+    @app.get("/api/v1/queue", tags=["revisión"])
+    def queue(_: Auth, view: str = "pending") -> dict[str, Any]:
+        repo = ctx.repository
+        summary = repo.get_status_summary()
+        counts = {
+            "pending": len(repo.list_invoices_needing_review()),
+            "approved": summary["review"].get("approved", 0),
+            "rejected": summary["review"].get("rejected", 0),
+            "failed": summary["documents"].get("failed", 0),
+            "needs_ocr": summary["documents"].get("needs_ocr", 0),
+        }
+        if view == "pending":
+            data = review.get_review_queue(ctx.review_deps())
+            return {
+                "view": view,
+                "counts": counts,
+                "items": data["invoices"],
+                "failed": data["failed"],
+                "needs_ocr": data["needs_ocr"],
+            }
+        if view not in ReviewStatus.ALL:
+            raise HTTPException(400, "Vista desconocida")
+        return {"view": view, "counts": counts, "items": repo.list_invoices_by_review_status(view)}
+
+    @app.get("/api/v1/invoices", tags=["consultas"])
+    def list_invoices(
+        _: Auth,
+        month: str | None = None,
+        validation_status: str | None = None,
+        review_status: str | None = None,
+        supplier_ruc: str | None = None,
+        q: Annotated[str | None, Query(max_length=100)] = None,
+        limit: Annotated[int, Query(ge=1, le=500)] = 50,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> dict[str, Any]:
+        check_month(month)
+        rows, total = ctx.repository.search_invoices(
+            month=month,
+            validation_status=validation_status,
+            review_status=review_status,
+            supplier_ruc=supplier_ruc,
+            query=q,
+            limit=limit,
+            offset=offset,
+        )
+        return {"items": rows, "total": total, "limit": limit, "offset": offset}
+
+    @app.get("/api/v1/invoices/{invoice_id}", tags=["consultas"])
+    def invoice_detail(invoice_id: int, _: Auth) -> dict[str, Any]:
+        return review.get_invoice_detail(ctx.review_deps(), invoice_id)
+
+    @app.get("/api/v1/invoices/{invoice_id}/document", tags=["consultas"], response_model=None)
+    def invoice_document(invoice_id: int, _: Auth) -> Response:
+        detail = ctx.repository.get_invoice_detail(invoice_id)
+        if not detail:
+            raise HTTPException(404, "No existe la factura")
+        path = Path(detail["file_path"])
+        if not path.is_file():
+            raise HTTPException(404, "El archivo original ya no está en su ruta")
+        # Un XML puede incrustar XHTML con scripts: se sirve como texto.
+        media = (
+            "text/plain; charset=utf-8"
+            if detail["mime_type"] == "application/xml"
+            else detail["mime_type"]
+        )
+        return FileResponse(
+            path,
+            media_type=media,
+            filename=detail["file_name"],
+            content_disposition_type="inline",
+            headers={
+                "X-Frame-Options": "SAMEORIGIN",
+                "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'",
+                "Cache-Control": "private, max-age=300",
+            },
+        )
+
+    @app.get("/api/v1/duplicates", tags=["consultas"])
+    def duplicates(_: Auth) -> dict[str, Any]:
+        return find_duplicates(ctx.review_deps())
+
+    @app.get("/api/v1/exports", tags=["consultas"], response_model=None)
+    def export(
+        _: Auth,
+        month: str | None = None,
+        format: Annotated[str, Query(pattern="^(csv|xlsx)$")] = "xlsx",
+        include_errors: bool = False,
+        include_duplicates: bool = False,
+        supplier_ruc: str | None = None,
+        currency: str | None = None,
+        delimiter: Annotated[str, Query(pattern="^[,;|\t]$")] = ",",
+        bom: bool = False,
+    ) -> Response:
+        result = build_export(
+            ctx.review_deps(),
+            month=month,
+            fmt=format,
+            include_errors=include_errors,
+            include_duplicates=include_duplicates,
+            supplier_ruc=supplier_ruc,
+            currency=currency,
+            delimiter=delimiter,
+            bom=bom,
+        )
+        return Response(
+            result.content,
+            media_type=result.media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{result.file_name}"',
+                "X-Rows": str(result.rows),
+            },
+        )
+
+    # --- Revisión --------------------------------------------------------------------
+
+    @app.post("/api/v1/invoices/{invoice_id}/approve", tags=["revisión"])
+    def approve(invoice_id: int, body: NoteBody, principal: Writer) -> dict[str, Any]:
+        return review.approve_invoice(
+            ctx.review_deps(),
+            invoice_id,
+            user=principal.signature,
+            note=body.note,
+            force=body.force,
+        )
+
+    @app.post("/api/v1/invoices/{invoice_id}/reject", tags=["revisión"])
+    def reject(invoice_id: int, body: RejectBody, principal: Writer) -> dict[str, Any]:
+        return review.reject_invoice(
+            ctx.review_deps(), invoice_id, user=principal.signature, reason=body.reason
+        )
+
+    @app.post("/api/v1/invoices/{invoice_id}/reopen", tags=["revisión"])
+    def reopen(invoice_id: int, body: NoteBody, principal: Writer) -> dict[str, Any]:
+        return review.reopen_invoice(
+            ctx.review_deps(), invoice_id, user=principal.signature, note=body.note
+        )
+
+    @app.post("/api/v1/invoices/{invoice_id}/correct", tags=["revisión"])
+    def correct(invoice_id: int, body: CorrectBody, principal: Writer) -> dict[str, Any]:
+        if not body.changes:
+            raise HTTPException(400, "Faltan los cambios")
+        return review.correct_invoice(
+            ctx.review_deps(),
+            invoice_id,
+            changes=list(body.changes.items()),
+            user=principal.signature,
+            note=body.note,
+        )
+
+    @app.post("/api/v1/issues/{issue_id}/resolve", tags=["revisión"])
+    def resolve(issue_id: int, body: NoteBody, principal: Writer) -> dict[str, Any]:
+        return review.resolve_issue(
+            ctx.review_deps(), issue_id, user=principal.signature, note=body.note
+        )
+
+    # --- Documentos (integración RPA) ------------------------------------------------
+
+    @app.post("/api/v1/documents", tags=["documentos"], status_code=201)
+    async def upload_documents(
+        principal: Writer,
+        files: Annotated[
+            list[UploadFile],
+            File(description="XML, PDF, PNG o JPG; el XML y su PDF juntos se vinculan"),
+        ],
+        process: Annotated[bool, Form()] = True,
+    ) -> dict[str, Any]:
+        """Recibe comprobantes de otro sistema (email-bot, ERP, un escáner) y los procesa."""
+        limit = ctx.config.serve.upload_max_mb * 1024 * 1024
+        if not files or len(files) > 50:
+            raise HTTPException(400, "Envía entre 1 y 50 archivos")
+        batch = (
+            Path(ctx.config.upload_dir)
+            / datetime.now(UTC).strftime("%Y-%m")
+            / (datetime.now(UTC).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(4))
+        )
+        saved: list[str] = []
+        for upload in files:
+            name = safe_file_name(upload.filename or "documento")
+            if Path(name).suffix.lower() not in SUPPORTED_EXTENSIONS:
+                raise HTTPException(
+                    415, f"Tipo de archivo no soportado: {name} (usa XML, PDF, PNG o JPG)"
+                )
+            content = await upload.read(limit + 1)
+            if len(content) > limit:
+                raise HTTPException(413, f"{name} supera {ctx.config.serve.upload_max_mb} MB")
+            batch.mkdir(parents=True, exist_ok=True)
+            target = batch / name
+            n = 2
+            while target.exists():
+                target = batch / f"{Path(name).stem}-{n}{Path(name).suffix}"
+                n += 1
+            target.write_bytes(content)
+            saved.append(str(target))
+        ctx.logger.info(
+            "documentos recibidos por la API",
+            extra={"by": principal.signature, "files": len(saved)},
+        )
+        if not process:
+            return {"folder": str(batch), "files": saved, "processed": False}
+        from starlette.concurrency import run_in_threadpool
+
+        summary = await run_in_threadpool(scan_invoices, ctx.deps, root=str(batch), recursive=False)
+        return {
+            "folder": str(batch),
+            "files": saved,
+            "processed": True,
+            "summary": summary.as_dict(),
+        }
+
+    # --- Tipo de cambio --------------------------------------------------------------
+
+    @app.get("/api/v1/fx", tags=["tipo de cambio"])
+    def list_fx(_: Auth, month: str | None = None, currency: str = "USD") -> dict[str, Any]:
+        today = ctx.config.today()
+        month = check_month(month) or today[:7]
+        start, following = month_range(month)
+        end = following - timedelta(days=1)
+        items = ctx.repository.list_exchange_rates(
+            currency=currency, start=start.isoformat(), end=end.isoformat()
+        )
+        return {"month": month, "items": items}
+
+    @app.post("/api/v1/fx", tags=["tipo de cambio"])
+    def set_fx(body: ExchangeRateBody, _: Writer) -> dict[str, Any]:
+        day = parse_date(body.date)
+        if not day:
+            raise HTTPException(400, "Fecha no válida (usa AAAA-MM-DD o DD/MM/AAAA)")
+        rate = {
+            "currency": body.currency,
+            "date": day,
+            "buy": body.buy,
+            "sell": body.sell,
+            "source": "manual",
+        }
+        return save_exchange_rates(ctx.review_deps(), [rate])
+
+    # --- SUNAT y ciclos del bot ------------------------------------------------------
+
+    @app.post("/api/v1/sunat/verify", tags=["sunat"])
+    def sunat_verify(body: SunatBody, _: Writer) -> dict[str, Any]:
+        check_month(body.month)
+        summary = verify_sunat(
+            ctx.review_deps(),
+            client=ctx.sunat_client(),
+            month=body.month,
+            force=body.force,
+            limit=body.limit,
+        )
+        return summary.as_dict()
+
+    @app.get("/api/v1/runs", tags=["bot"])
+    def runs(_: Auth, limit: Annotated[int, Query(ge=1, le=100)] = 20) -> dict[str, Any]:
+        return {"items": ctx.repository.list_bot_runs(limit)}
+
+    @app.get("/api/v1/runs/{run_id}", tags=["bot"])
+    def run_detail(run_id: int, _: Auth) -> dict[str, Any]:
+        row = ctx.repository.get_bot_run(run_id)
+        if not row:
+            raise HTTPException(404, "No existe la ejecución")
+        return row
+
+    @app.post("/api/v1/runs", tags=["bot"], status_code=202)
+    def start_run(principal: Writer) -> dict[str, Any]:
+        """Lanza un ciclo en segundo plano (el candado de SQL Server evita dos a la vez)."""
+        current: threading.Thread | None = app.state.run_thread
+        if current is not None and current.is_alive():
+            raise HTTPException(409, "Ya hay un ciclo en curso lanzado desde la API")
+        if any(r["status"] == "running" for r in ctx.repository.list_bot_runs(5)):
+            raise HTTPException(409, "Ya hay un ciclo en curso")
+
+        def work() -> None:
+            try:
+                ctx.run_cycle(trigger="api")
+            except LockedError as error:
+                ctx.logger.info("ciclo omitido: %s", error.message)
+            except Exception:
+                ctx.logger.exception("el ciclo lanzado desde la API falló")
+
+        thread = threading.Thread(target=work, name="invoicebot-run", daemon=True)
+        app.state.run_thread = thread
+        thread.start()
+        ctx.logger.info("ciclo lanzado desde la API", extra={"by": principal.signature})
+        return {"status": "started"}
+
+    return app

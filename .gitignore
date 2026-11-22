@@ -1,23 +1,32 @@
-# Dependencias
-node_modules/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # Secretos y configuración local
 .env
 .env.*
 !.env.example
 
-# Datos del usuario: base de datos, facturas, exportaciones y logs.
-# Anclados a la raíz con "/" para no ocultar carpetas de código como
-# src/infrastructure/exports/.
+# Datos del usuario: facturas, exportaciones, logs y datos locales.
+# Anclados a la raíz con "/" para no ocultar carpetas de código.
 /data/
 /exports/
 /facturas/
 /facturas-demo/
+/inbox/
 /invoices/
 /logs/
-*.db
-*.db-shm
-*.db-wal
 *.log
 
 # Documentos que nunca deben subirse (las pruebas generan los suyos en temporales)
@@ -26,24 +35,23 @@ node_modules/
 *.jpg
 *.jpeg
 
-# Cobertura y herramientas
-coverage/
+# Visual Studio / VS Code
 .vs/
 *.user
-.DS_Store
-Thumbs.db
-
-# Artefactos de compilación de Visual Studio
+*.suo
 obj/
-
-# Configuración local de herramientas
-/.claude/
-
-# Compilación de TypeScript
-/dist/
+bin/
+.vscode/*
+!.vscode/launch.json
 
 # Certificados y copias de la base de datos
 /tls/
 *.pfx
+*.pem
 *.key
 *.bak
+
+# Herramientas
+/.claude/
+.DS_Store
+Thumbs.db

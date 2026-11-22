@@ -1,108 +1,93 @@
-# InvoiceBot con SQL Server en Docker (servidor Linux, o desarrollo en un PC).
-# Guía completa: docs/instalacion-linux.md
+# InvoiceBot en un VPS (o un servidor de la oficina) con Docker Compose.
+# Guía completa: docs/despliegue-vps.md
 #
-#   cp .env.example .env        # completa MSSQL_SA_PASSWORD, INVOICEBOT_DB_* y la IA
-#   docker compose build
-#   docker compose up -d sqlserver
-#   docker compose run --rm bot db init   # con las variables de administrador (ver la guía)
-#   docker compose up -d
+#   cp .env.example .env                  # base de datos, IA, correo, dominio…
+#   docker compose --profile sql up -d sqlserver        # opcional: SQL Server en el mismo VPS
+#   docker compose run --rm api db init                 # crea la base y aplica migraciones
+#   docker compose run --rm api user add admin --name "Administrador"
+#   docker compose --profile sql --profile proxy up -d  # API + bot + SQL Server + HTTPS
 #
-# Las variables de .env llegan a los contenedores; las de `environment` de
-# cada servicio tienen prioridad (rutas dentro del contenedor).
+# Sin --profile sql, el bot usa el SQL Server de INVOICEBOT_DB_* (otro servidor o Azure SQL).
+# Sin --profile proxy, publica la API en 127.0.0.1:8000 para tu propio Nginx/Caddy.
 
 x-invoicebot: &invoicebot
   build: .
-  image: invoicebot:${INVOICEBOT_IMAGE_TAG:-latest}
+  image: ${INVOICEBOT_IMAGE:-ghcr.io/arcgabito/invoice-bot:latest}
   env_file: .env
   restart: unless-stopped
-  depends_on:
-    sqlserver:
-      condition: service_healthy
-    init-volumes:
-      condition: service_completed_successfully
   volumes:
-    - invoicebot-data:/app/data
-    - ${INVOICEBOT_INBOX_HOST_DIR:-./facturas}:/inbox:ro
-    - ${INVOICEBOT_EXPORT_HOST_DIR:-./exports}:/app/exports
-    - ${INVOICEBOT_LOG_HOST_DIR:-./logs}:/app/logs
-    - ${INVOICEBOT_TLS_HOST_DIR:-./tls}:/app/tls:ro
-    # Misma ruta que en el contenedor de SQL Server: así el bot ve las copias
-    # que escribe el servidor y puede borrar las antiguas.
+    - invoicebot-data:/data
+    - ${INVOICEBOT_INBOX_HOST_DIR:-./inbox}:/data/inbox
+    - ${INVOICEBOT_EXPORT_HOST_DIR:-./exports}:/data/exports
+    # Misma ruta que en el contenedor de SQL Server: el bot ve las copias y borra las antiguas.
     - sqlserver-backups:/var/opt/mssql/backup
 
 x-invoicebot-env: &invoicebot-env
-  INVOICEBOT_DB_SERVER: sqlserver
-  INVOICEBOT_DB_PORT: '1433'
-  # Certificado autofirmado del contenedor de SQL Server, en la red interna de Docker.
-  INVOICEBOT_DB_TRUST_CERT: 'true'
-  INVOICEBOT_INBOX_DIR: /inbox
-  INVOICEBOT_DATA_DIR: /app/data
-  # /inbox es de solo lectura: los adjuntos del correo se guardan en el volumen de datos.
-  INVOICEBOT_MAIL_DIR: /app/data/correo
-  INVOICEBOT_EXPORT_DIR: /app/exports
-  INVOICEBOT_LOG_DIR: /app/logs
+  INVOICEBOT_DB_SERVER: ${INVOICEBOT_DB_SERVER:-sqlserver}
   INVOICEBOT_BACKUP_DIR: /var/opt/mssql/backup
-  # La contraseña de sa está en .env para el contenedor de SQL Server; el bot no la necesita.
-  MSSQL_SA_PASSWORD: ''
+  INVOICEBOT_DATA_DIR: /data/app
+  INVOICEBOT_INBOX_DIR: /data/inbox
+  INVOICEBOT_EXPORT_DIR: /data/exports
 
 services:
+  # API REST y pantalla de revisión (uvicorn).
+  api:
+    <<: *invoicebot
+    command: ['serve', '--workers', '${INVOICEBOT_API_WORKERS:-2}']
+    environment:
+      <<: *invoicebot-env
+    ports:
+      - '${INVOICEBOT_API_PUBLISH:-127.0.0.1:8000}:8000'
+
+  # Ciclo RPA desatendido: correo, reintentos, escaneo, SUNAT, exportación y copia.
+  worker:
+    <<: *invoicebot
+    command: ['run', '--watch']
+    healthcheck:
+      disable: true
+    environment:
+      <<: *invoicebot-env
+
+  # SQL Server en el mismo VPS (Express: gratis hasta 10 GB). Perfil `sql`.
   sqlserver:
+    profiles: ['sql']
     image: mcr.microsoft.com/mssql/server:${MSSQL_VERSION:-2022-latest}
     restart: unless-stopped
     environment:
       ACCEPT_EULA: 'Y'
-      # Express es gratuita para producción (bases de hasta 10 GB). Developer
-      # solo para desarrollo y pruebas; Standard o Enterprise con licencia.
       MSSQL_PID: ${MSSQL_PID:-Express}
       MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?Define MSSQL_SA_PASSWORD en .env}
       TZ: ${TZ:-America/Lima}
-    # Solo accesible desde este equipo (herramientas de administración y `npm test`).
     ports:
       - '127.0.0.1:${MSSQL_HOST_PORT:-1433}:1433'
     volumes:
       - sqlserver-data:/var/opt/mssql
       - sqlserver-backups:/var/opt/mssql/backup
-    depends_on:
-      init-volumes:
-        condition: service_completed_successfully
     healthcheck:
-      test:
-        - CMD-SHELL
-        - /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q 'SELECT 1' -b -o /dev/null
+      test: ['CMD-SHELL', '/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q "SELECT 1" -b -o /dev/null']
       interval: 10s
       timeout: 5s
       retries: 20
       start_period: 30s
 
-  # Deja la carpeta de copias escribible por SQL Server y por el bot (UID 10001
-  # en las dos imágenes). Termina al instante.
-  init-volumes:
-    image: busybox:1.37
-    command: ['sh', '-c', 'chown 10001:0 /backup && chmod 2770 /backup']
-    volumes:
-      - sqlserver-backups:/backup
-    restart: 'no'
-
-  # Ciclo desatendido: lee el correo, reintenta, escanea /inbox, verifica, exporta y respalda.
-  bot:
-    <<: *invoicebot
-    command: ['run', '--watch']
+  # HTTPS automático con Let's Encrypt delante de la API. Perfil `proxy`.
+  caddy:
+    profiles: ['proxy']
+    image: caddy:2
+    restart: unless-stopped
     environment:
-      <<: *invoicebot-env
-
-  # Pantalla de revisión. Escucha en todas las interfaces del contenedor, así
-  # que exige usuarios (`invoicebot user add`) y HTTPS (certificado en ./tls).
-  review:
-    <<: *invoicebot
-    command: ['serve']
-    environment:
-      <<: *invoicebot-env
-      INVOICEBOT_SERVE_HOST: 0.0.0.0
-      INVOICEBOT_SERVE_PORT: '4317'
+      INVOICEBOT_DOMAIN: ${INVOICEBOT_DOMAIN:?Define INVOICEBOT_DOMAIN en .env}
     ports:
-      - '${INVOICEBOT_SERVE_PUBLISH:-4317}:4317'
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./deploy/vps/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - api
 
 volumes:
+  invoicebot-data:
   sqlserver-data:
   sqlserver-backups:
-  invoicebot-data:
+  caddy-data:

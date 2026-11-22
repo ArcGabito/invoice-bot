@@ -1,6 +1,20 @@
 <Solution>
-  <Project Path="invoice-bot.esproj">
-    <Build />
-    <Deploy />
-  </Project>
+  <Folder Name="/Solution Items/">
+    <File Path="README.md" />
+    <File Path="CHANGELOG.md" />
+    <File Path="pyproject.toml" />
+    <File Path=".env.example" />
+    <File Path="Dockerfile" />
+    <File Path="docker-compose.yml" />
+  </Folder>
+  <Folder Name="/deploy/">
+    <File Path="deploy/azure/main.bicep" />
+    <File Path="deploy/azure/main.parameters.json" />
+    <File Path="deploy/vps/Caddyfile" />
+  </Folder>
+  <Folder Name="/.github/">
+    <File Path=".github/workflows/ci.yml" />
+    <File Path=".github/workflows/deploy-azure.yml" />
+  </Folder>
+  <Project Path="invoice-bot.pyproj" Type="888888a0-9f3d-457c-b088-3a5042f75d52" />
 </Solution>

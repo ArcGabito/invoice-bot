@@ -1,0 +1,48 @@
+# Despliegue manual en Azure Container Apps (API + Job programado).
+# Requiere una federación OIDC de GitHub con Microsoft Entra y estos secretos del
+# repositorio: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID y ANTHROPIC_API_KEY.
+# Guía: docs/despliegue-azure.md
+name: Deploy Azure
+
+on:
+  workflow_dispatch:
+    inputs:
+      resource_group:
+        description: Grupo de recursos
+        required: true
+        default: rg-invoicebot
+      location:
+        description: Región
+        required: true
+        default: eastus2
+      image_tag:
+        description: Etiqueta de la imagen en GHCR (latest o un SHA)
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Grupo de recursos
+        run: az group create -n "${{ inputs.resource_group }}" -l "${{ inputs.location }}" -o none
+      - name: Plantilla Bicep
+        run: |
+          az deployment group create \
+            -g "${{ inputs.resource_group }}" \
+            -f deploy/azure/main.bicep \
+            -p deploy/azure/main.parameters.json \
+            -p image=ghcr.io/arcgabito/invoice-bot:${{ inputs.image_tag }} \
+            -p anthropicApiKey="${{ secrets.ANTHROPIC_API_KEY }}" \
+            --query properties.outputs -o json

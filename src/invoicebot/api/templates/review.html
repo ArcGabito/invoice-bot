@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <title>InvoiceBot · Revisión</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <strong>InvoiceBot</strong>
+    <nav class="tabs" id="tabs">
+      <button data-view="pending" class="active">Por revisar <span data-count="pending"></span></button>
+      <button data-view="approved">Aprobadas <span data-count="approved"></span></button>
+      <button data-view="rejected">Rechazadas <span data-count="rejected"></span></button>
+    </nav>
+    <span class="spacer"></span>
+    <a href="/api/v1/exports?format=xlsx" id="export-link" class="button">Excel del mes</a>
+    <button id="run-button" title="Lanza un ciclo del bot ahora">Ejecutar ciclo</button>
+    <span class="muted">{{ user.display_name }}</span>
+    <button id="logout">Salir</button>
+  </header>
+  <main class="layout">
+    <aside class="queue">
+      <div id="queue-notes" class="muted small"></div>
+      <ul id="queue-list"></ul>
+      <details id="documents-box" hidden>
+        <summary>Documentos sin factura</summary>
+        <ul id="documents-list"></ul>
+      </details>
+    </aside>
+    <section class="detail" id="detail">
+      <p class="muted">Elige una factura de la lista.</p>
+    </section>
+    <section class="preview" id="preview"></section>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/static/review.js"></script>
+</body>
+</html>

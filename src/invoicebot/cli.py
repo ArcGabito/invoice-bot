@@ -1,0 +1,1282 @@
+"""CLI de InvoiceBot (Typer). Mismos comandos y códigos de salida que la versión 0.x.
+
+Códigos de salida: 0 completado · 1 error general · 2 argumentos o configuración ·
+3 ejecución parcial (documentos fallidos o facturas con errores).
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import time
+import webbrowser
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Annotated, Any
+
+import typer
+
+from invoicebot import __version__
+from invoicebot.config import load_config
+from invoicebot.context import AppContext
+from invoicebot.errors import ConfigError, ExitCode, InvoiceBotError, LockedError, error_message
+from invoicebot.money import format_cents
+
+app = typer.Typer(
+    name="invoicebot",
+    help="Bot RPA de comprobantes de pago peruanos: XML UBL, PDF, OCR e IA, SUNAT y SQL Server.",
+    no_args_is_help=True,
+    add_completion=False,
+    rich_markup_mode=None,
+    pretty_exceptions_enable=False,
+)
+db_app = typer.Typer(help="Base de datos: init · migrate · status", no_args_is_help=True)
+fx_app = typer.Typer(help="Tipo de cambio: set · fetch · import · list", no_args_is_help=True)
+mail_app = typer.Typer(help="Correo: check · fetch · list · login", no_args_is_help=True)
+user_app = typer.Typer(help="Usuarios de la pantalla de revisión", no_args_is_help=True)
+key_app = typer.Typer(help="Claves de API para integrar otros sistemas", no_args_is_help=True)
+app.add_typer(db_app, name="db")
+app.add_typer(fx_app, name="fx")
+app.add_typer(mail_app, name="mail")
+app.add_typer(user_app, name="user")
+app.add_typer(key_app, name="apikey")
+
+
+@dataclass
+class Options:
+    provider: str | None = None
+    data_dir: str | None = None
+    concurrency: int | None = None
+    json: bool = False
+    verbose: bool = False
+    user: str | None = None
+    _context: AppContext | None = field(default=None, repr=False)
+
+    def context(self) -> AppContext:
+        if self._context is None:
+            overrides = {
+                "ai_provider": self.provider,
+                "data_dir": self.data_dir,
+                "concurrency": self.concurrency,
+                "reviewer": self.user,
+            }
+            config = load_config(overrides={k: v for k, v in overrides.items() if v is not None})
+            self._context = AppContext(config, verbose=self.verbose, reviewer=self.user)
+        return self._context
+
+
+OPTIONS = Options()
+
+
+def _default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, bytes):
+        return value.hex()
+    if hasattr(value, "as_dict"):
+        return value.as_dict()
+    if hasattr(value, "__dataclass_fields__"):
+        from dataclasses import asdict
+
+        return asdict(value)
+    return str(value)
+
+
+class Out:
+    """Texto para personas o, con --json, un objeto para automatización."""
+
+    def __init__(self, json_mode: bool):
+        self.json_mode = json_mode
+        self.payload: Any = None
+
+    def line(self, text: str = "") -> None:
+        if not self.json_mode:
+            typer.echo(text)
+
+    def data(self, payload: Any) -> None:
+        self.payload = payload
+
+    def flush(self) -> None:
+        if self.json_mode and self.payload is not None:
+            typer.echo(json.dumps(self.payload, ensure_ascii=False, indent=2, default=_default))
+
+
+def _run(fn: Callable[[AppContext, Out], int | None]) -> None:
+    out = Out(OPTIONS.json)
+    code: int = ExitCode.OK
+    try:
+        code = fn(OPTIONS.context(), out) or ExitCode.OK
+        out.flush()
+    except InvoiceBotError as error:
+        out.flush()
+        typer.echo(f"Error: {error.message}", err=True)
+        code = error.exit_code
+    except KeyboardInterrupt:
+        typer.echo("Interrumpido.", err=True)
+        code = ExitCode.GENERAL_ERROR
+    except Exception as error:
+        if OPTIONS.verbose:
+            raise
+        typer.echo(
+            f"Error inesperado: {error_message(error)} (usa --verbose para ver el detalle)",
+            err=True,
+        )
+        code = ExitCode.GENERAL_ERROR
+    finally:
+        if OPTIONS._context is not None:
+            OPTIONS._context.close()
+            OPTIONS._context = None
+    raise typer.Exit(int(code))
+
+
+def _version(value: bool) -> None:
+    if value:
+        typer.echo(f"InvoiceBot {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def main_options(
+    provider: Annotated[str | None, typer.Option(help="anthropic | ollama | mock")] = None,
+    data_dir: Annotated[str | None, typer.Option(help="Directorio de datos")] = None,
+    concurrency: Annotated[
+        int | None, typer.Option(min=1, max=16, help="Documentos a la vez")
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Salida JSON para automatización")
+    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+    user: Annotated[str | None, typer.Option(help="Quién firma las revisiones")] = None,
+    version: Annotated[bool, typer.Option("--version", callback=_version, is_eager=True)] = False,
+) -> None:
+    OPTIONS.provider, OPTIONS.data_dir, OPTIONS.concurrency = provider, data_dir, concurrency
+    OPTIONS.json, OPTIONS.verbose, OPTIONS.user = json_output, verbose, user
+    OPTIONS._context = None
+
+
+def _duration(ms: int) -> str:
+    seconds = ms // 1000
+    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+
+def _print_scan(out: Out, summary: Any, ctx: AppContext) -> None:
+    out.line(f"Documentos encontrados: {summary.found}")
+    out.line(f"Procesados correctamente: {summary.valid}")
+    out.line(f"Con advertencias: {summary.warning}")
+    out.line(f"Con errores: {summary.error}")
+    out.line(f"Fallidos: {summary.failed}")
+    out.line(f"Requieren OCR: {summary.needs_ocr}")
+    out.line(
+        f"Leídos del XML (sin IA): {summary.from_xml} · PDF vinculados a su XML: {summary.linked_to_xml}"
+    )
+    out.line(
+        f"Ya procesados (omitidos): {summary.already_processed} · otros omitidos: {summary.skipped}"
+    )
+    out.line(
+        f"Duplicados detectados: {summary.exact_duplicates + summary.possible_duplicates} "
+        f"(exactos: {summary.exact_duplicates}, posibles: {summary.possible_duplicates})"
+    )
+    for failure in summary.failures[:20]:
+        out.line(f"  ✗ {failure['file']}: {failure['message']}")
+    if summary.unsupported:
+        out.line(f"Archivos no compatibles ignorados: {len(summary.unsupported)}")
+    out.line()
+    out.line(f"Tiempo total: {_duration(summary.duration_ms)}")
+    out.line(f"Base de datos: SQL Server {ctx.db.describe()}")
+
+
+# --- Procesamiento -------------------------------------------------------------------
+
+
+@app.command()
+def scan(
+    path: Annotated[str, typer.Argument(help="Carpeta o archivo")],
+    recursive: Annotated[bool, typer.Option("--recursive", "-r")] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Inspecciona sin guardar ni llamar a la IA")
+    ] = False,
+    verify: Annotated[bool | None, typer.Option("--verify-sunat/--no-verify-sunat")] = None,
+) -> None:
+    """Procesa los documentos de una carpeta (o un archivo)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.processing import scan_invoices
+        from invoicebot.application.verify_sunat import verify_sunat
+
+        should_verify = ctx.config.sunat.verify_on_scan if verify is None else verify
+        sunat_client = ctx.sunat_client() if should_verify and not dry_run else None
+        out.line(f"InvoiceBot v{__version__}")
+        out.line()
+
+        def progress(done: int, total: int, file_path: str, result: Any) -> None:
+            if not out.json_mode:
+                typer.echo(f"  [{done}/{total}] {Path(file_path).name}: {result.outcome}", err=True)
+
+        summary = scan_invoices(
+            ctx.deps, root=path, recursive=recursive, dry_run=dry_run, on_progress=progress
+        )
+        if dry_run:
+            out.line(f"Simulación: {summary.found} documentos, {summary.queued} se procesarían.")
+            out.data(summary)
+            return ExitCode.OK
+        _print_scan(out, summary, ctx)
+        result: dict[str, Any] = {"scan": summary}
+        code = ExitCode.PARTIAL if summary.failed or summary.error else ExitCode.OK
+        if sunat_client:
+            try:
+                sunat = verify_sunat(ctx.deps, client=sunat_client)
+                result["sunat"] = sunat
+                out.line(f"SUNAT: {sunat.checked} consultados · {sunat.failed} fallidos")
+                if sunat.has_problems():
+                    code = ExitCode.PARTIAL
+            except InvoiceBotError as error:
+                out.line(f"La verificación en SUNAT falló: {error.message}")
+                result["sunat"] = {"error": error.message}
+                code = ExitCode.PARTIAL
+        out.data(result)
+        return code
+
+    _run(command)
+
+
+@app.command()
+def retry(
+    failed: Annotated[bool, typer.Option("--failed", help="Documentos fallidos")] = False,
+    pending: Annotated[
+        bool, typer.Option("--pending", help="Documentos de una ejecución interrumpida")
+    ] = False,
+    force: Annotated[bool, typer.Option("--force", help="También errores no recuperables")] = False,
+) -> None:
+    """Reintenta documentos fallidos o pendientes."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.processing import retry_documents
+
+        both = not failed and not pending
+        summary = retry_documents(
+            ctx.deps, failed=failed or both, pending=pending or both, force=force
+        )
+        out.line(
+            f"Candidatos: {summary.found} · reintentados: {summary.queued} · extraídos: {summary.extracted} · fallidos: {summary.failed}"
+        )
+        for skipped in summary.retry_skipped[:20]:
+            out.line(f"  omitido {skipped['file']}: {skipped['reason']}")
+        out.data(summary)
+        return ExitCode.PARTIAL if summary.failed or summary.error else ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def run(
+    watch: Annotated[
+        bool, typer.Option("--watch", help="Repite el ciclo cada INVOICEBOT_RUN_INTERVAL_MINUTES")
+    ] = False,
+    trigger: Annotated[str, typer.Option(help="manual | scheduled | watch")] = "manual",
+    inbox: Annotated[
+        str | None, typer.Option(help="Carpeta de entrada (por defecto INVOICEBOT_INBOX_DIR)")
+    ] = None,
+) -> None:
+    """Ciclo desatendido (RPA): correo, reintentos, escaneo, SUNAT, exportación y copia."""
+
+    def one_cycle(ctx: AppContext, out: Out, kind: str) -> int:
+        try:
+            result = ctx.run_cycle(trigger=kind, inbox_dir=inbox)
+        except LockedError as error:
+            # Una tarea programada que coincide con un ciclo largo se omite sin error.
+            out.line(f"Ciclo omitido: {error.message}")
+            return ExitCode.OK
+        compact = result.report.compact()
+        out.line(
+            f"Ejecución #{result.run_id}: {result.status} · encontrados {compact['found']} · extraídos "
+            f"{compact['extracted']} · con errores {compact['error']} · fallidos {compact['failed']}"
+        )
+        if compact["mailFiles"] is not None or compact["mailError"]:
+            out.line(
+                f"Correo: {compact['mailFiles'] or 0} archivos{' · ' + compact['mailError'] if compact['mailError'] else ''}"
+            )
+        for path in compact["exports"]:
+            out.line(f"Exportado: {path}")
+        if compact["backup"]:
+            out.line(f"Copia de seguridad: {compact['backup']}")
+        if result.error:
+            out.line(f"Error: {result.error}")
+        out.data(
+            {
+                "run_id": result.run_id,
+                "status": result.status,
+                "exit_code": result.exit_code,
+                "report": compact,
+            }
+        )
+        return result.exit_code
+
+    def command(ctx: AppContext, out: Out) -> int:
+        if not watch:
+            return one_cycle(ctx, out, trigger)
+        interval = ctx.config.run.interval_minutes * 60
+        out.line(
+            f"Modo continuo: un ciclo cada {ctx.config.run.interval_minutes} minutos (Ctrl+C para salir)"
+        )
+        while True:
+            started = time.monotonic()
+            try:
+                one_cycle(ctx, out, "watch")
+            except Exception as error:  # Un corte de red o de SQL Server no detiene el bot.
+                ctx.logger.error("error en el ciclo: %s", error_message(error))
+                typer.echo(f"Error en el ciclo: {error_message(error)}", err=True)
+            out.flush()
+            time.sleep(max(5.0, interval - (time.monotonic() - started)))
+
+    _run(command)
+
+
+@app.command("verify-sunat")
+def verify_sunat_command(
+    month: Annotated[str | None, typer.Option(help="AAAA-MM")] = None,
+    force: Annotated[
+        bool, typer.Option(help="Vuelve a consultar también los ya verificados")
+    ] = False,
+    limit: Annotated[int | None, typer.Option(min=1)] = None,
+) -> None:
+    """Consulta en SUNAT si cada comprobante es válido y el estado del RUC emisor."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.reports import check_month
+        from invoicebot.application.verify_sunat import verify_sunat
+
+        check_month(month)
+        summary = verify_sunat(
+            ctx.review_deps(),
+            client=ctx.sunat_client(),
+            month=month,
+            force=force,
+            limit=limit,
+            on_progress=lambda d, t, label, o: out.line(
+                f"  [{d}/{t}] {label}: {o.get('receipt_status') or o.get('error')}"
+            ),
+        )
+        out.line(
+            f"Consultados: {summary.checked}/{summary.candidates} · aceptados {summary.accepted} · anulados "
+            f"{summary.voided} · no existen {summary.not_found} · RUC no activo {summary.supplier_not_active} · "
+            f"no habido {summary.supplier_not_habido} · fallidos {summary.failed}"
+        )
+        out.data(summary)
+        return ExitCode.PARTIAL if summary.has_problems() else ExitCode.OK
+
+    _run(command)
+
+
+# --- Consultas -----------------------------------------------------------------------
+
+
+@app.command()
+def status() -> None:
+    """Estado de la base de datos, documentos pendientes, consumo de tokens y últimas ejecuciones."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        summary = ctx.repository.get_status_summary()
+        runs = ctx.repository.list_bot_runs(5)
+        out.line(f"Base de datos: SQL Server {ctx.db.describe()}")
+        out.line(f"Documentos: {summary['documents'] or 'ninguno'}")
+        out.line(f"Facturas por validación: {summary['invoices'] or 'ninguna'}")
+        out.line(f"Revisión: {summary['review'] or 'nada'}")
+        out.line(
+            f"Duplicados: exactos {summary['exact_duplicates']} · posibles {summary['possible_duplicates']}"
+        )
+        r = summary["runs"]
+        out.line(
+            f"Extracciones: {r['total']} ({r['failed']} fallidas) · tokens {r['input_tokens']} entrada / {r['output_tokens']} salida"
+        )
+        for item in runs:
+            out.line(
+                f"  #{item['id']} {item['started_at']:%Y-%m-%d %H:%M} UTC · {item['trigger']} · {item['status']}"
+            )
+        out.data({"summary": summary, "runs": runs})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def export(
+    month: Annotated[str | None, typer.Option(help="AAAA-MM")] = None,
+    csv_format: Annotated[bool, typer.Option("--csv")] = False,
+    xlsx_format: Annotated[bool, typer.Option("--xlsx")] = False,
+    status_filter: Annotated[
+        list[str] | None, typer.Option("--status", help="valid | warning | error")
+    ] = None,
+    include_errors: Annotated[bool, typer.Option("--include-errors")] = False,
+    include_duplicates: Annotated[bool, typer.Option("--include-duplicates")] = False,
+    supplier: Annotated[str | None, typer.Option(help="RUC del emisor")] = None,
+    currency: Annotated[str | None, typer.Option()] = None,
+    output: Annotated[str | None, typer.Option("--output", "-o")] = None,
+    delimiter: Annotated[str, typer.Option()] = ",",
+    bom: Annotated[bool, typer.Option("--bom", help="BOM UTF-8 para Excel")] = False,
+) -> None:
+    """Exporta facturas a CSV o Excel."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.reports import export_invoices
+
+        if csv_format and xlsx_format:
+            raise ConfigError("Usa --csv o --xlsx, no ambos")
+        fmt = "csv" if csv_format else "xlsx" if xlsx_format else ctx.config.export_format
+        result = export_invoices(
+            ctx.review_deps(),
+            output=output,
+            month=month,
+            statuses=status_filter,
+            include_errors=include_errors,
+            include_duplicates=include_duplicates,
+            supplier_ruc=supplier,
+            currency=currency,
+            fmt=fmt,
+            delimiter=delimiter,
+            bom=bom,
+        )
+        out.line(f"Exportadas {result.rows} facturas a {result.path}")
+        out.data({"path": result.path, "rows": result.rows})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def duplicates() -> None:
+    """Lista duplicados exactos y posibles coincidencias."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.reports import find_duplicates
+
+        data = find_duplicates(ctx.review_deps())
+        out.line(f"Duplicados exactos (mismo archivo en varias rutas): {len(data['exact'])}")
+        for group in data["exact"]:
+            out.line(
+                f"  documento #{group['key']}: " + ", ".join(i["file_path"] for i in group["items"])
+            )
+        out.line(
+            f"Posibles duplicados (mismo emisor, tipo, serie y número): {len(data['possible'])}"
+        )
+        for group in data["possible"]:
+            out.line(
+                f"  {group['key']}: "
+                + ", ".join(f"#{i['invoice_id']} {i['file_path']}" for i in group["items"])
+            )
+        out.data(data)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def review() -> None:
+    """Facturas con errores o advertencias, documentos fallidos y pendientes de OCR."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.review import get_review_queue
+
+        queue = get_review_queue(ctx.review_deps())
+        out.line(f"Facturas por revisar: {len(queue['invoices'])}")
+        for item in queue["invoices"]:
+            out.line(
+                f"  #{item['invoice_id']} [{item['validation_status']}] {item['series']}-{item['number']} "
+                f"{item['supplier_name'] or ''} · {item['currency'] or ''} {format_cents(item['total_cents'])}"
+            )
+            for issue in item["issues"]:
+                out.line(f"      - {issue['severity']}: {issue['message']}")
+        out.line(f"Documentos fallidos: {len(queue['failed'])}")
+        for doc in queue["failed"]:
+            out.line(f"  {doc['file_path']}: {doc['error_kind']} · {doc['error_message']}")
+        out.line(f"Pendientes de OCR: {len(queue['needs_ocr'])}")
+        out.data(queue)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def show(invoice_id: int) -> None:
+    """Datos, incidencias e historial de una factura."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.review import get_invoice_detail
+        from invoicebot.domain.invoice import AMOUNT_FIELDS, TEXT_FIELDS
+
+        detail = get_invoice_detail(ctx.review_deps(), invoice_id)
+        inv = detail["invoice"]
+        out.line(
+            f"Factura #{inv['id']} · {inv['file_name']} · {inv['validation_status']} · revisión {inv['review_status']}"
+        )
+        for name in TEXT_FIELDS:
+            if inv.get(name) is not None:
+                out.line(f"  {name}: {inv[name]}")
+        for name in AMOUNT_FIELDS:
+            if inv.get(f"{name}_cents") is not None:
+                out.line(f"  {name}: {format_cents(inv[f'{name}_cents'])}")
+        out.line("Incidencias:")
+        for issue in detail["issues"]:
+            state = " (resuelta)" if issue["resolved_at"] else ""
+            out.line(
+                f"  #{issue['id']} {issue['severity']} {issue['rule_code']}: {issue['message']}{state}"
+            )
+        if detail["mail_origins"]:
+            out.line("Correo de origen:")
+            for origin in detail["mail_origins"]:
+                out.line(f"  {origin['sender']} · {origin['subject']} · {origin['received_at']}")
+        out.line("Historial:")
+        for action in detail["actions"]:
+            out.line(
+                f"  {action['created_at']:%Y-%m-%d %H:%M} {action['user']}: {action['action']} {action['field'] or ''} {action['note'] or ''}"
+            )
+        out.data(detail)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def approve(
+    invoice_id: int,
+    note: Annotated[str | None, typer.Option("--note", "-n")] = None,
+    force: Annotated[bool, typer.Option(help="Aprobar aunque tenga errores (exige nota)")] = False,
+) -> None:
+    """Aprueba: confirma los datos y resuelve las advertencias."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.review import approve_invoice
+
+        result = approve_invoice(
+            ctx.review_deps(), invoice_id, user=ctx.reviewer, note=note, force=force
+        )
+        out.line(f"Factura #{invoice_id} aprobada ({result['resolved']} incidencias resueltas)")
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def reject(invoice_id: int, reason: Annotated[str, typer.Option("--reason", "-r")]) -> None:
+    """Rechaza: deja de exportarse y de aparecer en la bandeja."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.review import reject_invoice
+
+        out.data(reject_invoice(ctx.review_deps(), invoice_id, user=ctx.reviewer, reason=reason))
+        out.line(f"Factura #{invoice_id} rechazada")
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def reopen(
+    invoice_id: int, note: Annotated[str | None, typer.Option("--note", "-n")] = None
+) -> None:
+    """Devuelve una factura a pendiente."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.review import reopen_invoice
+
+        out.data(reopen_invoice(ctx.review_deps(), invoice_id, user=ctx.reviewer, note=note))
+        out.line(f"Factura #{invoice_id} reabierta")
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def correct(
+    invoice_id: int,
+    changes: Annotated[
+        list[str], typer.Argument(help="campo=valor (total=118.00 issue_date=15/10/2026)")
+    ],
+    note: Annotated[str | None, typer.Option("--note", "-n")] = None,
+) -> None:
+    """Corrige datos y revalida."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.review import correct_invoice
+
+        result = correct_invoice(
+            ctx.review_deps(), invoice_id, changes=changes, user=ctx.reviewer, note=note
+        )
+        for change in result["changed"]:
+            out.line(
+                f"  {change['field']}: {change['from'] or '(vacío)'} → {change['to'] or '(vacío)'}"
+            )
+        out.line(f"Estado de validación: {result['validation_status']}")
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def resolve(
+    issue_id: int, note: Annotated[str | None, typer.Option("--note", "-n")] = None
+) -> None:
+    """Da por resuelta una incidencia concreta."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.review import resolve_issue
+
+        result = resolve_issue(ctx.review_deps(), issue_id, user=ctx.reviewer, note=note)
+        out.line(
+            f"Incidencia #{issue_id} resuelta · factura #{result['invoice_id']}: {result['validation_status']}"
+        )
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Servidor ------------------------------------------------------------------------
+
+
+@app.command()
+def serve(
+    host: Annotated[str | None, typer.Option(help="Por defecto INVOICEBOT_SERVE_HOST")] = None,
+    port: Annotated[int | None, typer.Option(help="Por defecto INVOICEBOT_SERVE_PORT")] = None,
+    open_browser: Annotated[bool, typer.Option("--open", help="Abre el navegador")] = False,
+    workers: Annotated[int, typer.Option(min=1, max=32)] = 1,
+) -> None:
+    """Inicia la API REST y la pantalla de revisión (uvicorn)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        import uvicorn
+
+        config = ctx.config
+        bind_host = host or config.serve.host
+        bind_port = port or config.serve.port
+        try:
+            ctx.ensure_schema()
+            if ctx.users.count_active() == 0:
+                typer.echo(
+                    "Aviso: no hay usuarios activos. Crea uno con `invoicebot user add <usuario>` "
+                    "para entrar a la pantalla de revisión.",
+                    err=True,
+                )
+        except Exception as error:
+            # La API arranca igual (en un contenedor, SQL Server puede tardar): /readyz lo informa.
+            typer.echo(
+                f"Aviso: la base de datos aún no está lista: {error_message(error)}", err=True
+            )
+        tls = bool(config.serve.tls_cert and config.serve.tls_key)
+        scheme = "https" if tls else "http"
+        shown = "localhost" if bind_host in ("0.0.0.0", "::") else bind_host  # noqa: S104
+        url = f"{scheme}://{shown}:{bind_port}/"
+        typer.echo(f"InvoiceBot {__version__} escuchando en {url} (API en {url}docs)", err=True)
+        if open_browser:
+            webbrowser.open(url)
+        ctx.close()
+        uvicorn.run(
+            "invoicebot.api.main:app",
+            host=bind_host,
+            port=bind_port,
+            workers=workers,
+            proxy_headers=True,
+            forwarded_allow_ips=config.serve.forwarded_allow_ips,
+            ssl_certfile=config.serve.tls_cert if tls else None,
+            ssl_keyfile=config.serve.tls_key if tls else None,
+            ssl_keyfile_password=config.secret("INVOICEBOT_SERVE_TLS_PASSPHRASE"),
+            log_level="info" if OPTIONS.verbose else "warning",
+            server_header=False,
+        )
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Base de datos -------------------------------------------------------------------
+
+
+@db_app.command("init")
+def db_init() -> None:
+    """Crea la base de datos y su inicio de sesión, y aplica las migraciones."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.infrastructure.db.admin import init_database
+
+        result = init_database(ctx.config.db, ctx.config.env)
+        out.line(
+            f"Base de datos {ctx.config.db.name}: {'creada' if result.database_created else 'ya existía'}"
+        )
+        if result.login_created:
+            out.line("Inicio de sesión de la aplicación creado")
+        if result.user_created:
+            out.line("Usuario de la base de datos creado (db_owner)")
+        migration = ctx.ensure_schema()
+        applied = migration.applied if migration else []
+        out.line(f"Migraciones aplicadas: {', '.join(applied) if applied else 'ninguna (al día)'}")
+        if ctx.config.env.get("INVOICEBOT_DB_ADMIN_PASSWORD"):
+            out.line(
+                "Ahora borra INVOICEBOT_DB_ADMIN_USER e INVOICEBOT_DB_ADMIN_PASSWORD del .env."
+            )
+        out.data({"init": result, "applied": applied})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@db_app.command("migrate")
+def db_migrate() -> None:
+    """Aplica las migraciones pendientes (con copia de seguridad previa)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        migration = ctx.ensure_schema()
+        applied = migration.applied if migration else []
+        out.line(f"Migraciones aplicadas: {', '.join(applied) if applied else 'ninguna (al día)'}")
+        if migration and migration.backup:
+            out.line(f"Copia previa: {migration.backup}")
+        out.data({"applied": applied, "backup": migration.backup if migration else None})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@db_app.command("status")
+def db_status() -> None:
+    """Versión del esquema."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.infrastructure.db.migration import schema_status
+
+        info = schema_status(ctx.db)
+        out.line(
+            f"SQL Server {ctx.db.describe()} · esquema v{info['current']} de v{info['latest']}"
+        )
+        if info["pending"]:
+            out.line(f"Pendientes: {', '.join(info['pending'])} (ejecuta `invoicebot db migrate`)")
+        out.data(info)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@app.command()
+def backup(
+    list_only: Annotated[
+        bool, typer.Option("--list", help="Muestra las copias existentes")
+    ] = False,
+) -> None:
+    """Copia de seguridad verificada de la base de datos."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.infrastructure.db.backup import create_backup, list_backups
+
+        if list_only:
+            items = list_backups(ctx.db)
+            for item in items:
+                out.line(f"  {item.created_at:%Y-%m-%d %H:%M} UTC · {item.path}")
+            if not items:
+                out.line("No hay copias de InvoiceBot registradas en esta instancia.")
+            out.data(items)
+            return ExitCode.OK
+        ctx.ensure_schema()
+        result = create_backup(ctx.db, ctx.config.backup.dir, retention=ctx.config.backup.retention)
+        out.line(f"Copia verificada: {result.path}")
+        for name in result.removed:
+            out.line(f"  borrada por retención: {name}")
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Tipo de cambio ------------------------------------------------------------------
+
+
+@fx_app.command("set")
+def fx_set(
+    day: Annotated[str, typer.Argument(help="DD/MM/AAAA o AAAA-MM-DD")],
+    sell: Annotated[float, typer.Argument(help="Venta")],
+    buy: Annotated[float | None, typer.Option("--compra")] = None,
+    currency: Annotated[str, typer.Option()] = "USD",
+) -> None:
+    """Registra el tipo de cambio de un día."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.exchange_rates import save_exchange_rates
+        from invoicebot.infrastructure.sunat import parse_date
+
+        iso = parse_date(day)
+        if not iso or sell <= 0:
+            raise ConfigError("Indica una fecha válida y un tipo de cambio mayor que cero")
+        result = save_exchange_rates(
+            ctx.review_deps(),
+            [
+                {
+                    "currency": currency.upper(),
+                    "date": iso,
+                    "buy": buy,
+                    "sell": sell,
+                    "source": "manual",
+                }
+            ],
+        )
+        out.line(
+            f"Tipo de cambio {currency.upper()} {iso}: {sell} · facturas actualizadas: {result['updated']}"
+        )
+        out.data(result)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@fx_app.command("fetch")
+def fx_fetch() -> None:
+    """Descarga el tipo de cambio de hoy publicado por SUNAT."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.exchange_rates import save_exchange_rates
+        from invoicebot.infrastructure.sunat import SUNAT_EXCHANGE_RATE_URL, SunatExchangeRateSource
+
+        source = SunatExchangeRateSource(
+            url=ctx.config.fx.sunat_url or SUNAT_EXCHANGE_RATE_URL,
+            timeout_s=ctx.config.fx.timeout_s,
+        )
+        rate = source.fetch_today()
+        result = save_exchange_rates(ctx.review_deps(), [rate])
+        out.line(
+            f"SUNAT {rate['date']}: compra {rate['buy']} · venta {rate['sell']} · facturas actualizadas: {result['updated']}"
+        )
+        out.data({"rate": rate, **result})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@fx_app.command("import")
+def fx_import(
+    file: Annotated[Path, typer.Argument(exists=True, dir_okay=False)], currency: str = "USD"
+) -> None:
+    """Carga tipos de cambio desde un CSV (fecha, compra, venta)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.exchange_rates import save_exchange_rates
+        from invoicebot.infrastructure.sunat import parse_exchange_rate_csv
+
+        rates, errors = parse_exchange_rate_csv(
+            file.read_text(encoding="utf-8-sig"), currency=currency.upper()
+        )
+        for problem in errors:
+            out.line(f"  {problem}")
+        result = (
+            save_exchange_rates(ctx.review_deps(), rates)
+            if rates
+            else {"saved": 0, "updated": 0, "missing": 0}
+        )
+        out.line(
+            f"Tipos de cambio leídos: {len(rates)} · guardados: {result['saved']} · facturas actualizadas: {result['updated']}"
+        )
+        out.data({**result, "errors": errors})
+        return ExitCode.PARTIAL if errors else ExitCode.OK
+
+    _run(command)
+
+
+@fx_app.command("list")
+def fx_list(
+    month: Annotated[str | None, typer.Option(help="AAAA-MM")] = None, currency: str = "USD"
+) -> None:
+    """Tipos de cambio registrados."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from datetime import timedelta
+
+        from invoicebot.application.reports import check_month
+        from invoicebot.infrastructure.db.invoice_repository import month_range
+
+        chosen = check_month(month) or ctx.config.today()[:7]
+        start, following = month_range(chosen)
+        items = ctx.repository.list_exchange_rates(
+            currency=currency.upper(),
+            start=start.isoformat(),
+            end=(following - timedelta(days=1)).isoformat(),
+        )
+        for item in items:
+            out.line(
+                f"  {item['rate_date']} compra {item['buy']} venta {item['sell']} ({item['source']})"
+            )
+        if not items:
+            out.line(f"Sin tipos de cambio de {currency.upper()} en {chosen}")
+        out.data(items)
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Correo --------------------------------------------------------------------------
+
+
+@mail_app.command("check")
+def mail_check() -> None:
+    """Prueba la conexión con el buzón y cuenta los correos con adjuntos recientes."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from datetime import timedelta
+
+        source = ctx.mail_source()
+        address = source.connect()
+        try:
+            since = datetime.now(UTC) - timedelta(days=ctx.config.mail.since_days)
+            refs = source.list_messages(since=since)
+        finally:
+            source.close()
+        out.line(
+            f"Conectado a {source.provider}:{address} · {len(refs)} correos con adjuntos en {ctx.config.mail.since_days} días"
+        )
+        out.data({"account": f"{source.provider}:{address}", "messages": len(refs)})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@mail_app.command("fetch")
+def mail_fetch() -> None:
+    """Descarga los adjuntos nuevos sin procesarlos."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.fetch_mail import fetch_mail
+
+        summary = fetch_mail(ctx.review_deps(), source=ctx.mail_source(), directory=ctx.mail_dir())
+        out.line(
+            f"{summary.account}: leídos {summary.read} · con comprobantes {summary.saved} · archivos {summary.files} · "
+            f"sin comprobantes {summary.no_attachments} · fallidos {summary.failed} · movidos {summary.moved}"
+        )
+        out.data(summary)
+        return ExitCode.PARTIAL if summary.failed else ExitCode.OK
+
+    _run(command)
+
+
+@mail_app.command("list")
+def mail_list(limit: int = 20) -> None:
+    """Últimos correos leídos y qué se hizo con cada uno."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        items = ctx.repository.list_mail_messages(limit)
+        for item in items:
+            out.line(
+                f"  {item['received_at']} · {item['sender']} · {item['subject']} · {item['status']} ({item['files']} archivos)"
+            )
+        out.data(items)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@mail_app.command("login")
+def mail_login() -> None:
+    """Inicia sesión en Gmail u Outlook / Microsoft 365 y guarda el acceso."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.infrastructure.mail.factory import login_scope
+        from invoicebot.infrastructure.mail.login import (
+            google_login,
+            microsoft_device_login,
+            write_mail_token,
+        )
+
+        mail = ctx.config.mail
+        if mail.provider == "gmail":
+            if not mail.google.client_id or not mail.google.client_secret_set:
+                raise ConfigError(
+                    "Define INVOICEBOT_MAIL_GOOGLE_CLIENT_ID e INVOICEBOT_MAIL_GOOGLE_CLIENT_SECRET"
+                )
+            token = google_login(
+                client_id=mail.google.client_id,
+                client_secret=ctx.config.secret("INVOICEBOT_MAIL_GOOGLE_CLIENT_SECRET") or "",
+                scope=login_scope(mail),
+                open_browser=webbrowser.open,
+                say=typer.echo,
+            )
+            client_id = mail.google.client_id
+        elif mail.provider == "graph":
+            if not mail.microsoft.client_id:
+                raise ConfigError("Define INVOICEBOT_MAIL_MS_CLIENT_ID")
+            token = microsoft_device_login(
+                client_id=mail.microsoft.client_id,
+                tenant=mail.microsoft.tenant,
+                scope=login_scope(mail),
+                say=typer.echo,
+            )
+            client_id = mail.microsoft.client_id
+        else:
+            raise ConfigError("`mail login` es para INVOICEBOT_MAIL_PROVIDER=gmail o graph")
+        write_mail_token(
+            mail.token_file,
+            provider=mail.provider,
+            client_id=client_id,
+            account=mail.user or "",
+            refresh_token=token,
+        )
+        out.line(f"Acceso guardado en {mail.token_file} (protégelo como una contraseña)")
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Usuarios y claves de API --------------------------------------------------------
+
+
+@user_app.command("add")
+def user_add(
+    username: str,
+    name: Annotated[str | None, typer.Option("--name")] = None,
+    password: Annotated[
+        str | None, typer.Option(help="Sin indicarla se genera una aleatoria")
+    ] = None,
+) -> None:
+    """Da de alta a una persona en la pantalla de revisión."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.users import add_user
+
+        result = add_user(ctx.users, username, display_name=name, password=password)
+        out.line(f"Usuario {result.user['username']} creado.")
+        if result.generated:
+            out.line(f"Contraseña (se muestra una sola vez): {result.password}")
+        out.data({"user": result.user, "password": result.password if result.generated else None})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@user_app.command("list")
+def user_list() -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        users = ctx.users.list_users()
+        for u in users:
+            out.line(
+                f"  {u['username']} · {u['display_name']} · {'activo' if u['active'] else 'desactivado'} · último acceso {u['last_login_at'] or 'nunca'}"
+            )
+        out.data(users)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@user_app.command("reset-password")
+def user_reset(username: str, password: Annotated[str | None, typer.Option()] = None) -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.users import reset_password
+
+        result = reset_password(ctx.users, username, password=password)
+        out.line(f"Contraseña de {result.user['username']} cambiada; sus sesiones se cerraron.")
+        if result.generated:
+            out.line(f"Nueva contraseña (se muestra una sola vez): {result.password}")
+        return ExitCode.OK
+
+    _run(command)
+
+
+@user_app.command("disable")
+def user_disable(username: str) -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.users import set_user_active
+
+        set_user_active(ctx.users, username, active=False)
+        out.line(f"Usuario {username} desactivado; sus sesiones se cerraron.")
+        return ExitCode.OK
+
+    _run(command)
+
+
+@user_app.command("enable")
+def user_enable(username: str) -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.users import set_user_active
+
+        set_user_active(ctx.users, username, active=True)
+        out.line(f"Usuario {username} activado.")
+        return ExitCode.OK
+
+    _run(command)
+
+
+@key_app.command("create")
+def apikey_create(
+    name: Annotated[str, typer.Argument(help="Sistema que la usará (p. ej. email-bot)")],
+    scope: Annotated[str, typer.Option(help="read | write")] = "write",
+) -> None:
+    """Crea una clave de API (se muestra una sola vez)."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        from invoicebot.application.users import create_api_key
+
+        key, row = create_api_key(ctx.users, name, scope=scope, created_by=ctx.reviewer)
+        out.line(f"Clave {row['prefix']} ({scope}) para {row['name']}:")
+        out.line(key)
+        out.line(
+            "Guárdala en el gestor de secretos del sistema que la usará: no se vuelve a mostrar."
+        )
+        out.data({"key": key, **row})
+        return ExitCode.OK
+
+    _run(command)
+
+
+@key_app.command("list")
+def apikey_list() -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        keys = ctx.users.list_api_keys()
+        for k in keys:
+            out.line(
+                f"  #{k['id']} {k['prefix']} · {k['name']} · {k['scope']} · {'activa' if k['active'] else 'revocada'} · último uso {k['last_used_at'] or 'nunca'}"
+            )
+        out.data(keys)
+        return ExitCode.OK
+
+    _run(command)
+
+
+@key_app.command("revoke")
+def apikey_revoke(
+    key: Annotated[str, typer.Argument(help="Prefijo (ibk_xxxxxxxx) o número")],
+) -> None:
+    def command(ctx: AppContext, out: Out) -> int:
+        if not ctx.users.revoke_api_key(key):
+            raise ConfigError(f"No hay una clave activa {key}")
+        out.line(f"Clave {key} revocada.")
+        return ExitCode.OK
+
+    _run(command)
+
+
+# --- Diagnóstico ---------------------------------------------------------------------
+
+
+@app.command()
+def doctor() -> None:
+    """Comprueba Python, SQL Server, lectura de PDF, OCR, IA, SUNAT y correo."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        checks: list[dict[str, Any]] = []
+
+        def check(name: str, fn: Callable[[], str], *, optional: bool = False) -> None:
+            try:
+                detail, ok = fn(), True
+            except Exception as error:
+                detail, ok = error_message(error), False
+            checks.append({"name": name, "ok": ok, "optional": optional, "detail": detail})
+            out.line(f"{'✓' if ok else ('·' if optional else '✗')} {name}: {detail}")
+
+        check("Python", lambda: sys.version.split()[0])
+        check("SQL Server", ctx.db.ping)
+
+        def schema() -> str:
+            from invoicebot.infrastructure.db.migration import schema_status
+
+            info = schema_status(ctx.db)
+            if info["pending"]:
+                raise ConfigError(f"faltan migraciones: {', '.join(info['pending'])}")
+            return f"esquema v{info['current']}"
+
+        check("Esquema", schema)
+
+        def pdf() -> str:
+            import pypdfium2
+
+            return f"PDFium {pypdfium2.PDFIUM_INFO.version if hasattr(pypdfium2, 'PDFIUM_INFO') else 'disponible'}"
+
+        check("Lectura de PDF", pdf)
+        engine = ctx.config.ocr.engine
+        if engine == "tesseract":
+            from invoicebot.infrastructure.ocr import create_ocr_engine
+
+            ocr = create_ocr_engine(ctx.config)
+            check("OCR (Tesseract)", lambda: ocr.ping() if ocr else "desactivado")
+        else:
+            check("OCR", lambda: f"motor {engine}", optional=True)
+        check(f"IA ({ctx.config.ai_provider})", ctx.ai_provider.ping)
+        if ctx.config.sunat.enabled:
+            check("SUNAT", lambda: ctx.sunat_client().ping())
+        else:
+            check("SUNAT", lambda: "desactivada (INVOICEBOT_SUNAT_ENABLED=false)", optional=True)
+        if ctx.config.mail.provider != "none":
+
+            def mail() -> str:
+                source = ctx.mail_source()
+                try:
+                    return f"{source.provider}:{source.connect()}"
+                finally:
+                    source.close()
+
+            check("Correo", mail)
+        out.data(checks)
+        return (
+            ExitCode.OK if all(c["ok"] or c["optional"] for c in checks) else ExitCode.GENERAL_ERROR
+        )
+
+    _run(command)
+
+
+@app.command("config")
+def show_config() -> None:
+    """Configuración efectiva, sin revelar secretos."""
+
+    def command(ctx: AppContext, out: Out) -> int:
+        c = ctx.config
+        out.line(f"Proveedor de IA:     {c.ai_provider}")
+        if c.ai_provider == "anthropic":
+            out.line(f"  Modelo:            {c.anthropic.model} (effort {c.anthropic.effort})")
+            out.line(
+                f"  ANTHROPIC_API_KEY: {'definida' if c.anthropic.api_key_set else 'no definida'}"
+            )
+        if c.ai_provider == "ollama":
+            out.line(f"  Ollama:            {c.ollama.url} · {c.ollama.model}")
+        out.line(
+            f"Base de datos:       SQL Server {ctx.db.describe()} · cifrado {'sí' if c.db.encrypt else 'no'}"
+        )
+        out.line(f"OCR:                 {c.ocr.engine} ({', '.join(c.ocr.languages)})")
+        out.line(f"SUNAT:               {'activada' if c.sunat.enabled else 'desactivada'}")
+        out.line(
+            f"Correo:              {c.mail.provider}{' · ' + (c.mail.user or '') if c.mail.provider != 'none' else ''}"
+        )
+        out.line(f"Carpeta de entrada:  {c.run.inbox_dir or 'no definida'}")
+        out.line(
+            f"Exportaciones:       {c.export_dir} ({c.export_format}) · en cada ciclo: {c.run.export}"
+        )
+        out.line(f"Datos:               {c.data_dir}")
+        out.line(
+            f"API:                 {c.serve.host}:{c.serve.port} · docs {'sí' if c.serve.api_docs else 'no'}"
+        )
+        out.line(f"Zona horaria:        {c.timezone} (hoy {c.today()})")
+        out.data(
+            {
+                "ai_provider": c.ai_provider,
+                "anthropic": {
+                    "model": c.anthropic.model,
+                    "effort": c.anthropic.effort,
+                    "api_key": c.anthropic.api_key_set,
+                },
+                "database": ctx.db.describe(),
+                "ocr": c.ocr.engine,
+                "sunat": c.sunat.enabled,
+                "mail": c.mail.provider,
+                "inbox_dir": c.run.inbox_dir,
+                "export_dir": c.export_dir,
+                "timezone": c.timezone,
+            }
+        )
+        return ExitCode.OK
+
+    _run(command)
+
+
+def main() -> None:
+    app()
+
+
+if __name__ == "__main__":
+    main()

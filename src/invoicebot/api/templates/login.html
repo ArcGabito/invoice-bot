@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>InvoiceBot · Ingreso</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login">
+  <main class="login-card">
+    <h1>InvoiceBot</h1>
+    <p class="muted">Revisión de comprobantes · v{{ version }}</p>
+    <form id="login-form" autocomplete="on">
+      <label>Usuario <input name="username" autocomplete="username" required maxlength="40" autofocus></label>
+      <label>Contraseña <input name="password" type="password" autocomplete="current-password" required maxlength="256"></label>
+      <button type="submit" class="primary">Entrar</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </form>
+  </main>
+  <script src="/static/login.js"></script>
+</body>
+</html>

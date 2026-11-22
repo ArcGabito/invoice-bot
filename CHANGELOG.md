@@ -2,6 +2,34 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [Semantic Versioning](https://semver.org/lang/es/).
 
+## [1.0.0] - 2026-11-21
+
+Migración completa de Node.js/TypeScript a **Python 3.12+ con FastAPI**. La versión anterior queda en la etiqueta `v0.6.0-node`.
+
+### Compatibilidad
+
+- Mismas reglas de validación (`2026.10.3`), mismo prompt (`invoice-extraction/2026-10-31.3`) y mismo lector UBL (`ubl-2.1-sunat/2026-10-31.1`): los resultados son comparables con los de la 0.6.
+- Mismo esquema de SQL Server (migraciones 1-4 idénticas): una base creada por la 0.6 se reconoce y se migra a la v5.
+- Mismos comandos, opciones, códigos de salida, variables `INVOICEBOT_*` y columnas de exportación.
+- Las contraseñas de los usuarios (scrypt) siguen siendo válidas.
+
+### Añadido
+
+- **API REST (FastAPI)** con documentación OpenAPI en `/docs`: facturas, bandeja de revisión, acciones de revisión, exportaciones, tipos de cambio, verificación en SUNAT, ciclos del bot y sondas `/healthz` y `/readyz`.
+- `POST /api/v1/documents`: otros sistemas (email-bot, ERP, escáneres) envían comprobantes y se procesan al instante.
+- **Claves de API** (`invoicebot apikey create|list|revoke`) con alcance `read` o `write`; migración `005_api_keys`. Los ciclos lanzados desde la API quedan en `bot_runs` con `trigger = api`.
+- **Cadena de conexión de SSMS / ADO.NET** en `INVOICEBOT_DB_CONNECTION_STRING` (se traduce a ODBC), **seguridad integrada de Windows** (`INVOICEBOT_DB_AUTH=windows`, también instancias con nombre) e **identidad administrada de Azure** (`managed-identity`). `db init` puede dar acceso a una cuenta de servicio (`INVOICEBOT_DB_WINDOWS_LOGIN`).
+- **Despliegue**: Dockerfile con ODBC 18 y Tesseract; Docker Compose para VPS (API, worker, SQL Server y Caddy con HTTPS); Bicep para Azure Container Apps (API) + Container Apps Job programado (ciclo RPA) + Azure SQL serverless + Azure Files; workflow de despliegue manual.
+- Logs JSON (`INVOICEBOT_LOG_FORMAT=json`) para Log Analytics; `INVOICEBOT_RUN_PARTIAL_EXIT_CODE` para Jobs; `INVOICEBOT_TIMEZONE`.
+- Solución de Visual Studio (`invoice-bot.slnx`) con proyecto de Python (`invoice-bot.pyproj`).
+- CI: lint (ruff), tipos (mypy), pruebas contra SQL Server 2022, pruebas en Windows, imagen Docker, validación del Bicep y publicación de la imagen en GHCR.
+
+### Cambiado
+
+- Lectura de PDF con PDFium (pypdfium2) y OCR con Tesseract del sistema (pytesseract).
+- La pantalla de revisión exige siempre usuario y contraseña (antes, en local, bastaba un token por ejecución). El HTTPS lo pone Azure Container Apps, Caddy u otro proxy; `INVOICEBOT_SERVE_TLS_CERT/_KEY` (PEM) para una VM sin proxy. El certificado `.pfx` ya no se admite: conviértelo a PEM.
+- En Azure SQL Database, `backup` informa que las copias son automáticas en vez de fallar.
+
 ## [0.6.0] - 2026-10-31
 
 ### Añadido

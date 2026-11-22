@@ -4,22 +4,40 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+      - run: mypy
+
   # Pruebas completas contra un SQL Server real (contenedor de servicio).
-  # Los runners de Windows no admiten contenedores de servicio: allí solo se
-  # ejecutan las pruebas que no usan la base de datos (job windows).
   test:
     runs-on: ubuntu-latest
     env:
-      # Contraseña de un servidor efímero que solo existe durante este job.
       SA_PASSWORD: Ci-InvoiceBot-2026!sa
       INVOICEBOT_TEST_DB_SERVER: localhost
       INVOICEBOT_TEST_DB_PORT: '1433'
-      INVOICEBOT_TEST_DB_USER: invoicebot_ci
-      INVOICEBOT_TEST_DB_PASSWORD: Ci-InvoiceBot-2026!app
+      INVOICEBOT_TEST_DB_USER: sa
+      INVOICEBOT_TEST_DB_PASSWORD: Ci-InvoiceBot-2026!sa
       INVOICEBOT_TEST_DB_TRUST_CERT: 'true'
-      # Falla en vez de saltarse las pruebas de integración si falta la conexión.
+      # Falla en vez de omitir las pruebas de integración si falta la conexión.
       INVOICEBOT_TEST_DB_REQUIRED: 'true'
     services:
       sqlserver:
@@ -38,36 +56,32 @@ jobs:
           --health-start-period 30s
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-python@v6
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run build
-      # Igual que scripts/dev/setup-local-sqlserver.ps1: las pruebas usan un
-      # inicio de sesión con el rol dbcreator, no sa, para detectar permisos que falten.
-      - name: Crear el inicio de sesión de pruebas
-        run: >-
-          docker exec ${{ job.services.sqlserver.id }}
-          /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$SA_PASSWORD" -b -Q
-          "CREATE LOGIN [$INVOICEBOT_TEST_DB_USER] WITH PASSWORD = N'$INVOICEBOT_TEST_DB_PASSWORD', CHECK_POLICY = ON;
-          ALTER SERVER ROLE [dbcreator] ADD MEMBER [$INVOICEBOT_TEST_DB_USER];"
-      - run: npm test
+          python-version: '3.13'
+          cache: pip
+      - name: Controlador ODBC 18 y Tesseract
+        run: |
+          if ! dpkg -s msodbcsql18 >/dev/null 2>&1; then
+            curl -fsSL https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb -o /tmp/mprod.deb
+            sudo dpkg -i /tmp/mprod.deb
+            sudo apt-get update
+            sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+          fi
+          sudo apt-get install -y unixodbc tesseract-ocr tesseract-ocr-spa
+      - run: pip install -e ".[dev]"
+      - run: pytest --cov --cov-report=term-missing:skip-covered
 
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-python@v6
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run test:unit
+          python-version: '3.13'
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/unit
 
   docker:
     runs-on: ubuntu-latest
@@ -75,7 +89,37 @@ jobs:
       - uses: actions/checkout@v5
       - name: Construir la imagen
         run: docker build -t invoicebot:ci .
-      - name: La imagen arranca
-        run: docker run --rm invoicebot:ci --version
+      - name: La imagen arranca y tiene ODBC y Tesseract
+        run: |
+          docker run --rm invoicebot:ci --version
+          docker run --rm --entrypoint sh invoicebot:ci -c "odbcinst -q -d | grep -q 'ODBC Driver 18' && tesseract --list-langs | grep -q spa"
       - name: docker-compose.yml es válido
-        run: touch .env && MSSQL_SA_PASSWORD=x docker compose config --quiet
+        run: touch .env && MSSQL_SA_PASSWORD=x INVOICEBOT_DOMAIN=example.com docker compose --profile sql --profile proxy config --quiet
+      - name: La plantilla de Azure (Bicep) compila
+        run: az bicep build --file deploy/azure/main.bicep --stdout > /dev/null
+
+  # Imagen publicada en GHCR para Azure Container Apps y para los VPS (solo en main).
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, test, docker]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/arcgabito/invoice-bot:latest
+            ghcr.io/arcgabito/invoice-bot:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

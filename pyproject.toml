@@ -1,0 +1,93 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "invoicebot"
+version = "1.0.0"
+description = "Bot RPA de comprobantes peruanos: XML UBL, PDF, OCR e IA, validación contable, SUNAT, SQL Server y API FastAPI"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.md"]
+requires-python = ">=3.12"
+authors = [{ name = "ArcGabito" }]
+keywords = ["rpa", "sunat", "facturas", "ubl", "fastapi", "sql-server", "ocr"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Framework :: FastAPI",
+  "Operating System :: OS Independent",
+  "Natural Language :: Spanish",
+]
+dependencies = [
+  "anthropic>=2.12",
+  "defusedxml>=0.7",
+  "fastapi>=0.165",
+  "httpx>=0.28",
+  "jinja2>=3.1",
+  "openpyxl>=3.1",
+  "pillow>=12.0",
+  "pydantic>=2.12",
+  "pyjwt[crypto]>=2.10",
+  "pyodbc>=5.2",
+  "pypdfium2>=5.0",
+  "pytesseract>=0.3.13",
+  "python-dotenv>=1.1",
+  "python-multipart>=0.0.20",
+  "sqlalchemy>=2.0.40",
+  "typer>=0.16",
+  "tzdata>=2025.2",
+  "uvicorn[standard]>=0.35",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.18",
+  "pytest>=8.4",
+  "pytest-cov>=6.2",
+  "ruff>=0.13",
+]
+
+[project.scripts]
+invoicebot = "invoicebot.cli:main"
+
+[project.urls]
+Repository = "https://github.com/ArcGabito/invoice-bot"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/invoicebot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "db: necesita un SQL Server real (INVOICEBOT_TEST_DB_* o .env.test)",
+  "ocr: necesita Tesseract instalado",
+]
+filterwarnings = ["ignore::DeprecationWarning:pytesseract"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PL"]
+ignore = [
+  "E501", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004", "PLW0603", "PLC0415",
+  "S101", "S105", "S106", "S311", "S608", "RUF001", "RUF002", "RUF003", "B008", "SIM108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "PLR", "B017"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+check_untyped_defs = true
+no_implicit_optional = true
+
+[tool.coverage.run]
+source = ["invoicebot"]
+branch = true
