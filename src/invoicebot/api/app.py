@@ -43,7 +43,7 @@ from invoicebot.api.security import (
     principal_dependency,
     require,
 )
-from invoicebot.application import approvals, events, integrations, purchasing, review
+from invoicebot.application import approvals, events, integrations, purchasing, review, tax
 from invoicebot.application.companies import add_company
 from invoicebot.application.exchange_rates import save_exchange_rates
 from invoicebot.application.reports import build_export, check_month, find_duplicates
@@ -244,6 +244,19 @@ class WebhookBody(BaseModel):
     url: str = Field(pattern=r"^https?://", max_length=500)
     events: str = Field(default="*", max_length=500)
     company_ruc: str | None = Field(default=None, pattern=r"^\d{11}$")
+
+
+class DepositBody(BaseModel):
+    invoice_id: int
+    constancia: str = Field(pattern=r"^\d{1,20}$")
+    deposit_date: date
+    amount: Decimal = Field(gt=0, description="Soles")
+
+
+class SupplierStatusBody(BaseModel):
+    good_taxpayer: bool | None = None
+    retention_agent: bool | None = None
+    perception_agent: bool | None = None
 
 
 class JobBody(BaseModel):
@@ -1133,6 +1146,103 @@ def create_app(context: AppContext | None = None) -> FastAPI:
             ends_on=body.ends_on,
             reason=body.reason,
         )
+
+    # --- Cumplimiento tributario (SIRE, detracciones, retenciones) --------------------------
+
+    @app.post("/api/v1/sire/proposals", tags=["tributario"], status_code=201)
+    async def upload_sire_proposal(
+        principal: Reviewer,
+        file: Annotated[UploadFile, File(description="Propuesta del RCE (TXT, CSV o ZIP)")],
+        period: Annotated[str, Form(pattern=r"^\d{4}-?\d{2}$")],
+        company_ruc: Annotated[str | None, Form(pattern=r"^\d{11}$")] = None,
+    ) -> dict[str, Any]:
+        """Importa la propuesta del Registro de Compras descargada del SIRE."""
+        from starlette.concurrency import run_in_threadpool
+
+        content = await file.read(200 * 1024 * 1024 + 1)
+        if len(content) > 200 * 1024 * 1024:
+            raise HTTPException(413, "El archivo supera 200 MB")
+        suffix = Path(file.filename or "propuesta.txt").suffix.lower() or ".txt"
+        folder = Path(ctx.config.data_dir) / "sire"
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"{period.replace('-', '')}-{secrets.token_hex(4)}{suffix}"
+        target.write_bytes(content)
+        return await run_in_threadpool(
+            tax.import_sire_proposal,
+            ctx,
+            target,
+            period=period,
+            company_ruc=company_ruc,
+            created_by=principal.signature,
+        )
+
+    @app.get("/api/v1/sire/reconciliation", tags=["tributario"], response_model=None)
+    def sire_reconciliation(
+        _: Reader,
+        period: Annotated[str, Query(pattern=r"^\d{4}-?\d{2}$")],
+        company_ruc: str | None = None,
+        format: Annotated[str, Query(pattern="^(json|xlsx)$")] = "json",
+    ) -> Response:
+        data = tax.reconcile(ctx, period=period, company_ruc=company_ruc)
+        if format == "xlsx":
+            return Response(
+                tax.reconciliation_xlsx(data),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={
+                    "content-disposition": f'attachment; filename="sire-{data["period"]}.xlsx"'
+                },
+            )
+        return ApiResponse(data)
+
+    @app.get("/api/v1/detractions/pending", tags=["tributario"])
+    def detractions_pending(principal: Reader) -> dict[str, Any]:
+        return {"items": tax.pending_detractions(ctx, company_ids=principal.company_ids)}
+
+    @app.post("/api/v1/detractions/deposits", tags=["tributario"], status_code=201)
+    def detraction_deposit(body: DepositBody, principal: Reviewer) -> dict[str, Any]:
+        if ctx.repository.get_invoice_detail(body.invoice_id) is None:
+            raise HTTPException(404, "No existe la factura")
+        return tax.record_deposit(
+            ctx,
+            invoice_id=body.invoice_id,
+            constancia=body.constancia,
+            deposit_date=body.deposit_date,
+            amount_cents=round(body.amount * 100),
+            created_by=principal.signature,
+        )
+
+    @app.get(
+        "/api/v1/detractions/payment-file", tags=["tributario"], response_class=PlainTextResponse
+    )
+    def detraction_file(
+        _: Exporter,
+        invoice_id: Annotated[list[int], Query()],
+        lot: Annotated[str, Query(pattern=r"^\d{6}$")],
+        company_ruc: str | None = None,
+    ) -> Response:
+        content = tax.detraction_payment_file(
+            ctx, invoice_ids=invoice_id, lot=lot, company_ruc=company_ruc
+        )
+        return PlainTextResponse(
+            content, headers={"content-disposition": f'attachment; filename="D{lot}.txt"'}
+        )
+
+    @app.get("/api/v1/retentions", tags=["tributario"])
+    def retentions(
+        _: Exporter,
+        month: Annotated[str, Query(pattern=r"^\d{4}-\d{2}$")],
+        company_ruc: str | None = None,
+    ) -> dict[str, Any]:
+        items = tax.retention_report(ctx, month=month, company_ruc=company_ruc)
+        return {
+            "month": month,
+            "items": items,
+            "total_cents": sum(i["retention_cents"] for i in items),
+        }
+
+    @app.put("/api/v1/suppliers/{ruc}/tax-status", tags=["tributario"])
+    def supplier_status(ruc: str, body: SupplierStatusBody, _: Reviewer) -> dict[str, Any]:
+        return tax.set_supplier_status(ctx, ruc, **body.model_dump())
 
     # --- Webhooks y eventos ------------------------------------------------------------------
 

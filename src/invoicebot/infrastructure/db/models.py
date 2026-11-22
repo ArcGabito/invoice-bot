@@ -27,6 +27,7 @@ from sqlalchemy import (
     Column,
     Computed,
     Date,
+    ForeignKey,
     ForeignKeyConstraint,
     Identity,
     Index,
@@ -1213,3 +1214,68 @@ class ValidationIssue(Base):
     resolved_at: Mapped[datetime.datetime | None] = mapped_column(DATETIME2)
     resolved_by: Mapped[str | None] = mapped_column(Unicode(100))
     resolution_note: Mapped[str | None] = mapped_column(Unicode(1000))
+
+
+# --- Migración 009: cumplimiento tributario --------------------------------------------
+
+
+class SireProposal(Base):
+    __tablename__ = "sire_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(start=1, increment=1), primary_key=True)
+    company_id: Mapped[int | None] = mapped_column(Integer)
+    period: Mapped[str] = mapped_column(NCHAR(6), nullable=False)
+    source: Mapped[str] = mapped_column(Unicode(10), nullable=False, default="file")
+    file_name: Mapped[str | None] = mapped_column(Unicode(260))
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by: Mapped[str | None] = mapped_column(Unicode(150))
+    created_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False, default=utcnow)
+
+    entries: Mapped[list[SireEntry]] = relationship(
+        back_populates="proposal", cascade="all, delete-orphan"
+    )
+
+
+class SireEntry(Base):
+    __tablename__ = "sire_entries"
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(start=1, increment=1), primary_key=True)
+    proposal_id: Mapped[int] = mapped_column(Integer, ForeignKey("sire_proposals.id"))
+    supplier_ruc: Mapped[str | None] = mapped_column(Unicode(15))
+    document_type: Mapped[str | None] = mapped_column(Unicode(2))
+    series: Mapped[str | None] = mapped_column(Unicode(20))
+    number: Mapped[str | None] = mapped_column(Unicode(20))
+    issue_date: Mapped[datetime.date | None] = mapped_column(Date)
+    currency: Mapped[str | None] = mapped_column(Unicode(3))
+    total_cents: Mapped[int | None] = mapped_column(BigInteger)
+    igv_cents: Mapped[int | None] = mapped_column(BigInteger)
+    car: Mapped[str | None] = mapped_column(Unicode(40))
+    raw: Mapped[str | None] = mapped_column(UnicodeText())
+
+    proposal: Mapped[SireProposal] = relationship(back_populates="entries")
+
+
+class DetractionDeposit(Base):
+    __tablename__ = "detraction_deposits"
+
+    id: Mapped[int] = mapped_column(Integer, Identity(start=1, increment=1), primary_key=True)
+    invoice_id: Mapped[int] = mapped_column(Integer, ForeignKey("invoices.id"))
+    constancia: Mapped[str] = mapped_column(Unicode(20), nullable=False)
+    deposit_date: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source: Mapped[str] = mapped_column(Unicode(20), nullable=False, default="manual")
+    created_by: Mapped[str | None] = mapped_column(Unicode(150))
+    created_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False, default=utcnow)
+
+
+class SupplierTaxStatus(Base):
+    """Condición tributaria del proveedor (padrones de SUNAT o carga manual)."""
+
+    __tablename__ = "supplier_tax_status"
+
+    ruc: Mapped[str] = mapped_column(Unicode(11), primary_key=True)
+    good_taxpayer: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    retention_agent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    perception_agent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source: Mapped[str] = mapped_column(Unicode(20), nullable=False, default="manual")
+    updated_at: Mapped[datetime.datetime] = mapped_column(DATETIME2, nullable=False, default=utcnow)

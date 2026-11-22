@@ -116,17 +116,18 @@ Cada actor es **idempotente**: recibe un identificador, no el documento, y vuelv
 
 **Hecho cuando**: una factura que coincide con su orden y su recepción queda autorizada para pago sin intervención humana, y cada excepción tiene su motivo (`tests/integration/test_purchasing.py`).
 
-## Fase 3: Cumplimiento tributario (SUNAT)
+## Fase 3: Cumplimiento tributario (SUNAT) ✅
 
 **Objetivo**: cerrar el mes de compras cuadrado con SUNAT y sin perder crédito fiscal.
 
-- [ ] **SIRE, Registro de Compras Electrónico**: descargar la propuesta de SUNAT con el API SIRE (credenciales por empresa en Key Vault) y cruzarla con lo registrado. El reporte muestra faltantes, sobrantes y diferencias de importe o fecha, y se puede exportar el archivo de ajustes.
-- [ ] **Reverificación programada** en SUNAT antes del cierre, para detectar comprobantes anulados después de recibidos y RUC que pasaron a no habido.
-- [ ] **Detracciones (SPOT)**: control de constancias de depósito, alertas de detracciones sin depositar y **archivo TXT de pago masivo** para SUNAT/Banco de la Nación.
-- [ ] **Retenciones** (si la empresa es agente de retención): cálculo del 3 % por pago y datos para emitir el comprobante de retención.
-- [ ] Alertas de **plazo de anotación** de comprobantes (pérdida de crédito fiscal) y de facturas observadas.
+- [x] **SIRE, Registro de Compras Electrónico**: importación de la propuesta descargada (TXT, CSV o ZIP, lectura por encabezados) y cuadre con lo registrado. El reporte en Excel muestra faltantes, sobrantes y diferencias de importe, IGV o fecha.
+- [ ] *Pendiente*: la descarga automática con el API SIRE (credenciales de SUNAT y tickets) y el archivo de ajustes. Se harán con el manual vigente del API y una cuenta de pruebas; no se inventaron endpoints.
+- [x] **Reverificación programada** en SUNAT del mes anterior antes del cierre (`sunat.reverify`).
+- [x] **Detracciones (SPOT)**: pendientes, constancias de depósito, alerta de detracciones sin depositar y **archivo de depósito masivo** (layout aislado para verificarlo con la guía vigente).
+- [x] **Retenciones**: cálculo del 3 % con la condición del proveedor (padrones de buenos contribuyentes y agentes). *Pendiente*: emitir el comprobante de retención (requiere un OSE o SEE).
+- [x] Alertas de **plazo de anotación** (12 periodos) y de detracciones pendientes (`compliance.alerts`).
 
-**Hecho cuando**: el cuadre del mes contra SIRE se genera solo, en un trabajo programado, y lista cada diferencia con su comprobante.
+**Hecho cuando**: el cuadre del mes contra el SIRE sale en un comando o una llamada a la API y lista cada diferencia con su comprobante (`tests/integration/test_tax.py`).
 
 ## Fase 4: Contabilidad, pagos e integración
 

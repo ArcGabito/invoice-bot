@@ -17,6 +17,8 @@
 | ``approvals.remind`` | default | Recordatorios y escalamiento de aprobaciones vencidas |
 | ``webhooks.deliver`` | default | Entrega firmada de un evento a un webhook |
 | ``webhooks.sweep`` | default | Encola las entregas pendientes que quedaron sin trabajo |
+| ``sunat.reverify`` | sunat | Reconsulta en SUNAT los comprobantes del mes anterior |
+| ``compliance.alerts`` | default | Plazo del crédito fiscal y detracciones pendientes |
 """
 
 from __future__ import annotations
@@ -301,3 +303,37 @@ def webhooks_sweep(ctx: AppContext, _payload: dict[str, Any]) -> dict[str, Any]:
     from invoicebot.application.events import dispatch
 
     return {"queued": dispatch(ctx)}
+
+
+@registry.task(
+    "sunat.reverify",
+    queue="sunat",
+    description="Reconsulta en SUNAT el mes anterior (anulados y RUC no habidos)",
+    time_limit_s=2 * 60 * 60,
+)
+def sunat_reverify(ctx: AppContext, payload: dict[str, Any]) -> dict[str, Any]:
+    from invoicebot.application.run_bot import current_and_previous_month
+    from invoicebot.application.verify_sunat import verify_sunat
+
+    if not ctx.config.sunat.enabled:
+        return {"skipped": "INVOICEBOT_SUNAT_ENABLED=false"}
+    month = payload.get("month") or current_and_previous_month(ctx.config.today())[1]
+    summary = verify_sunat(
+        ctx.review_deps(),
+        client=ctx.limited_sunat_client(),
+        month=month,
+        force=True,
+        limit=payload.get("limit"),
+    )
+    return {"month": month, **summary.as_dict()}
+
+
+@registry.task(
+    "compliance.alerts",
+    queue="default",
+    description="Alertas de plazo del crédito fiscal y detracciones pendientes",
+)
+def compliance_alerts(ctx: AppContext, _payload: dict[str, Any]) -> dict[str, Any]:
+    from invoicebot.application.tax import compliance_alerts as run
+
+    return run(ctx)

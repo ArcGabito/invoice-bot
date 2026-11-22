@@ -34,6 +34,7 @@ La versión 1.0 es la migración completa a Python de la 0.6 (Node.js, etiqueta 
 | **Colas con Redis (Dramatiq)**: workers que escalan, reintentos con espera, idempotencia, programador cron | ✅ 1.1 |
 | **Multiempresa** con Row-Level Security, **roles**, **inicio de sesión con Microsoft o Google** y auditoría de cambios ([guía](docs/seguridad-y-empresas.md)) | ✅ 1.1 |
 | **Cuentas por pagar**: órdenes de compra, match a 2 y 3 vías, notas aplicadas, matriz de aprobación con enlace de un clic y webhooks firmados ([guía](docs/cuentas-por-pagar.md)) | ✅ 1.1 |
+| **Cumplimiento tributario**: cuadre con la propuesta del SIRE, reverificación antes del cierre, detracciones, retenciones y plazo del crédito fiscal ([guía](docs/cumplimiento-tributario.md)) | ✅ 1.1 |
 | **uv** (`uv.lock`) para dependencias reproducibles en desarrollo, Docker y CI | ✅ 1.1 |
 
 El plan por fases (multiempresa, aprobaciones, SIRE, pagos, portal de proveedores) está en [ROADMAP.md](ROADMAP.md).
@@ -130,6 +131,7 @@ La imagen (`Dockerfile`, construida con uv) incluye ODBC 18 y Tesseract con espa
 | `invoicebot purchasing import-orders` · `import-receipts` · `orders` · `match` | Órdenes de compra, recepciones y match. |
 | `invoicebot approvals list` · `approve` · `reject` · `rules` · `rule-add` · `rule-remove` · `delegate` | Aprobación de pago. |
 | `invoicebot webhook add` · `list` · `remove` · `events` | Webhooks firmados y eventos publicados. |
+| `invoicebot sire import` · `reconcile` · `detractions pending\|deposit\|payment-file` · `taxpayers set\|import-padron\|retentions` | Cumplimiento tributario. |
 | `invoicebot db init` · `db migrate` · `db status` · `backup [--list]` | Base de datos. |
 | `invoicebot doctor` · `config` | Diagnóstico y configuración efectiva (sin secretos). |
 
